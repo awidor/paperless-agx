@@ -203,6 +203,12 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
     assert_eq!(pages_json.as_array().unwrap().len(), 1);
     assert_eq!(pages_json[0]["thumbnail_ready"], true);
     assert_eq!(pages_json[0]["text"], "Recognized page text");
+    assert_eq!(pages_json[0]["blocks"][0]["label"], "Text");
+    assert_eq!(
+        pages_json[0]["blocks"][0]["bbox"],
+        serde_json::json!([0, 0, 1000, 1000])
+    );
+    assert_eq!(pages_json[0]["blocks"][0]["text"], "Recognized page text");
 
     let thumbnail = app
         .clone()

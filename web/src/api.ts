@@ -5,6 +5,7 @@ export type DocumentPageResult = components["schemas"]["DocumentPageResult"];
 export type DocumentPatch = components["schemas"]["DocumentPatch"];
 export type DocumentSort = components["schemas"]["DocumentSort"];
 export type HealthResponse = components["schemas"]["HealthResponse"];
+export type OcrBlock = components["schemas"]["OcrBlock"];
 export type PageInfo = components["schemas"]["PageInfo"];
 export type SearchHit = components["schemas"]["SearchHit"];
 export type SearchRequest = components["schemas"]["SearchRequest"];

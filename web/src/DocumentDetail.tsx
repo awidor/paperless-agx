@@ -10,6 +10,7 @@ import {
   type PageInfo,
 } from "./api";
 import { PdfViewer } from "./PdfViewer";
+import { OcrTextLayer } from "./OcrTextLayer";
 
 export function DocumentDetail({ documentId, initialPage, types, onClose, onChanged }: { documentId: number; initialPage: number; types: string[]; onClose: () => void; onChanged: () => void }) {
   const [document, setDocument] = useState<Document | null>(null);
@@ -83,6 +84,7 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
   }
 
   const current = pages.find((item) => item.page === page);
+  const blocks = current?.blocks ?? [];
   return <div className="detail-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <aside className="detail-panel" aria-label="Document detail">
       <header className="detail-header"><div><p className="eyebrow">Document detail</p><h2>{document?.title || document?.filename || "Loading"}</h2></div><button className="icon-button" aria-label="Close" onClick={onClose}><X /></button></header>
@@ -92,8 +94,9 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
         <div className="detail-content">
           <section className="preview-column">
             <div className="document-viewer">
-              {tab === "text" ? <article className="ocr-text">{current?.text || "Text is not ready for this page."}</article> : document.media_type === "pdf" ? <PdfViewer url={`/api/documents/${documentId}/file`} page={page} /> : <img src={`/api/documents/${documentId}/file`} alt={document.title || document.filename} />}
+              {tab === "text" ? <article className="ocr-text">{current?.text || "Text is not ready for this page."}</article> : document.media_type === "pdf" ? <PdfViewer url={`/api/documents/${documentId}/file`} page={page} blocks={blocks} /> : <div className="ocr-page-frame image-page-frame"><img src={`/api/documents/${documentId}/file`} alt={document.title || document.filename} /><OcrTextLayer blocks={blocks} /></div>}
             </div>
+            {tab === "preview" && blocks.length > 0 && <p className="selection-hint">Drag across the page text to select and copy it.</p>}
             <div className="page-controls"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={17} /> Previous</button><span>Page {page} of {document.page_count || 1}</span><button disabled={page >= document.page_count} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight size={17} /></button></div>
             <div className="thumbnail-rail">{pages.map((item) => <button key={item.page} className={item.page === page ? "active" : ""} onClick={() => setPage(item.page)}><img src={`/api/documents/${documentId}/thumbnails/${item.page}`} alt={`Page ${item.page}`} /><span>{item.page}</span></button>)}</div>
           </section>

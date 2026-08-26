@@ -338,12 +338,12 @@ pub async fn get_pages(
     Path(document_id): Path<u64>,
 ) -> Result<Json<Vec<PageInfo>>, AppError> {
     let document = active_document(&state, document_id).await?;
-    let text_by_page: std::collections::HashMap<_, _> = state
+    let stored_pages: std::collections::HashMap<_, _> = state
         .pages
         .list(document_id)
         .await?
         .into_iter()
-        .map(|page| (page.page, page.text))
+        .map(|page| (page.page, page))
         .collect();
     let pages = (1..=document.page_count)
         .map(|page| PageInfo {
@@ -352,7 +352,11 @@ pub async fn get_pages(
                 .layout
                 .thumbnail_path(document.document_id, page)
                 .is_file(),
-            text: text_by_page.get(&page).cloned(),
+            text: stored_pages.get(&page).map(|stored| stored.text.clone()),
+            blocks: stored_pages
+                .get(&page)
+                .map(|stored| stored.blocks.clone())
+                .unwrap_or_default(),
         })
         .collect();
     Ok(Json(pages))

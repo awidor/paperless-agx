@@ -11,6 +11,8 @@ base64.workspace = true
 chrono.workspace = true
 futures.workspace = true
 html2md.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
 reqwest.workspace = true
 paperless-models = { path = "../models" }
 serde.workspace = true

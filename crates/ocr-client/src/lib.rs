@@ -4,7 +4,9 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use futures::{StreamExt, TryStreamExt, stream};
-use paperless_models::{DocumentPage, InferredMetadata};
+use html5ever::{parse_document, tendril::TendrilSink};
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
+use paperless_models::{DocumentPage, InferredMetadata, OcrBlock};
 use reqwest::{Client, Request, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -54,6 +56,7 @@ pub struct PageImage {
 pub struct OcrPage {
     pub page: u32,
     pub text: String,
+    pub blocks: Vec<OcrBlock>,
 }
 
 #[derive(Clone)]
@@ -386,7 +389,89 @@ fn parse_page_response(page: u32, body: &[u8]) -> Result<OcrPage> {
         .as_deref()
         .unwrap_or_default();
     let text = html2md::parse_html(html).trim().to_owned();
-    Ok(OcrPage { page, text })
+    let blocks = parse_ocr_blocks(html)?;
+    Ok(OcrPage { page, text, blocks })
+}
+
+fn parse_ocr_blocks(html: &str) -> Result<Vec<OcrBlock>> {
+    let document = parse_document(RcDom::default(), Default::default()).one(html);
+    let mut blocks = Vec::new();
+    collect_ocr_blocks(&document.document, &mut blocks)?;
+    if !html.trim().is_empty() && blocks.is_empty() {
+        bail!("OCR response contains no positioned blocks");
+    }
+    Ok(blocks)
+}
+
+fn collect_ocr_blocks(handle: &Handle, blocks: &mut Vec<OcrBlock>) -> Result<()> {
+    if let NodeData::Element { name, attrs, .. } = &handle.data
+        && name.local.as_ref() == "div"
+    {
+        let attributes = attrs.borrow();
+        let label = attributes
+            .iter()
+            .find(|attribute| attribute.name.local.as_ref() == "data-label")
+            .map(|attribute| attribute.value.to_string());
+        let bbox = attributes
+            .iter()
+            .find(|attribute| attribute.name.local.as_ref() == "data-bbox")
+            .map(|attribute| attribute.value.to_string());
+        drop(attributes);
+        if label.is_some() || bbox.is_some() {
+            let label = label.context("OCR block has no data-label")?;
+            if label.trim().is_empty() {
+                bail!("OCR block has an empty data-label");
+            }
+            let bbox =
+                parse_normalized_bbox(bbox.as_deref().context("OCR block has no data-bbox")?)?;
+            let mut raw_text = String::new();
+            collect_node_text(handle, &mut raw_text);
+            let text = raw_text.split_whitespace().collect::<Vec<_>>().join(" ");
+            blocks.push(OcrBlock {
+                label: label.trim().to_owned(),
+                bbox,
+                text,
+            });
+            return Ok(());
+        }
+    }
+    for child in handle.children.borrow().iter() {
+        collect_ocr_blocks(child, blocks)?;
+    }
+    Ok(())
+}
+
+fn collect_node_text(handle: &Handle, output: &mut String) {
+    if let NodeData::Text { contents } = &handle.data {
+        output.push_str(&contents.borrow());
+        output.push(' ');
+    }
+    for child in handle.children.borrow().iter() {
+        collect_node_text(child, output);
+    }
+}
+
+fn parse_normalized_bbox(value: &str) -> Result<[u16; 4]> {
+    let coordinates = value
+        .split_whitespace()
+        .map(str::parse::<f32>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("OCR block data-bbox contains a non-number")?;
+    if coordinates.len() != 4
+        || coordinates
+            .iter()
+            .any(|coordinate| !coordinate.is_finite() || !(0.0..=1000.0).contains(coordinate))
+        || coordinates[0] >= coordinates[2]
+        || coordinates[1] >= coordinates[3]
+    {
+        bail!("OCR block data-bbox must be x0 y0 x1 y1 within 0-1000");
+    }
+    Ok([
+        coordinates[0].round() as u16,
+        coordinates[1].round() as u16,
+        coordinates[2].round() as u16,
+        coordinates[3].round() as u16,
+    ])
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -490,7 +575,14 @@ mod tests {
         assert_eq!(page.page, 3);
         assert!(page.text.contains("Title"));
         assert!(page.text.contains("Body text"));
+        assert_eq!(page.blocks.len(), 2);
+        assert_eq!(page.blocks[0].label, "SectionHeader");
+        assert_eq!(page.blocks[0].bbox, [0, 0, 1000, 100]);
+        assert_eq!(page.blocks[0].text, "Title");
+        assert_eq!(page.blocks[1].bbox, [0, 100, 1000, 200]);
+        assert_eq!(page.blocks[1].text, "Body text");
     }
+
     #[test]
     fn parses_and_validates_structured_metadata() {
         let body = serde_json::json!({

@@ -182,12 +182,14 @@ mod tests {
                 document_id: 9,
                 page: 1,
                 text: "First sentence. Second sentence.".into(),
+                blocks: vec![],
                 updated_at: now,
             },
             DocumentPage {
                 document_id: 9,
                 page: 2,
                 text: "Page two.".into(),
+                blocks: vec![],
                 updated_at: now,
             },
         ];

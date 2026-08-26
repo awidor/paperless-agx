@@ -11,6 +11,7 @@ use axum::{
 };
 use paperless_embeddings::EmbeddingService;
 use paperless_ingest::{CleanupQueue, IngestionQueue, MetadataService, PreviewService};
+use paperless_models::IngestionStatus;
 use paperless_ocr_client::OcrClient;
 use paperless_search::ChunkRepository;
 use paperless_storage::{DataLayout, DocumentRepository, ObjectStore, PageRepository};
@@ -46,6 +47,24 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
     let documents = DocumentRepository::open(&layout).await?;
     let pages = PageRepository::open(&layout).await?;
     let chunks = ChunkRepository::open(&layout.lance).await?;
+    for document_id in pages.documents_missing_layout().await? {
+        let Some(document) = documents.get(document_id).await? else {
+            continue;
+        };
+        if document.deleted_at.is_none()
+            && !matches!(
+                document.status,
+                IngestionStatus::Stored
+                    | IngestionStatus::Previewing
+                    | IngestionStatus::Ocr
+                    | IngestionStatus::Failed
+            )
+        {
+            documents
+                .set_status(document_id, IngestionStatus::Ocr, None)
+                .await?;
+        }
+    }
     let objects = ObjectStore::new(layout.clone());
     let previews = PreviewService::new(
         layout.clone(),

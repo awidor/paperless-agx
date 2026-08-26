@@ -161,10 +161,18 @@ pub struct UploadMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OcrBlock {
+    pub label: String,
+    pub bbox: [u16; 4],
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentPage {
     pub document_id: u64,
     pub page: u32,
     pub text: String,
+    pub blocks: Vec<OcrBlock>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -173,6 +181,7 @@ pub struct PageInfo {
     pub page: u32,
     pub thumbnail_ready: bool,
     pub text: Option<String>,
+    pub blocks: Vec<OcrBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

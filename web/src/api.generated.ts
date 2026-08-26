@@ -218,10 +218,16 @@ export interface components {
             page_size: number;
             total: number;
         };
+        OcrBlock: {
+            label: string;
+            bbox: number[];
+            text: string;
+        };
         PageInfo: {
             page: number;
             thumbnail_ready: boolean;
             text?: string | null;
+            blocks: components["schemas"]["OcrBlock"][];
         };
         SearchRequest: {
             query: string;

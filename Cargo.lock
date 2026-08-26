@@ -4519,6 +4519,8 @@ dependencies = [
  "chrono",
  "futures",
  "html2md",
+ "html5ever",
+ "markup5ever_rcdom",
  "paperless-models",
  "parking_lot",
  "reqwest",
@@ -4589,6 +4591,7 @@ dependencies = [
  "futures",
  "lancedb",
  "paperless-models",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
