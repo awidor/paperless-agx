@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -42,6 +43,9 @@ impl PreviewService {
             max_ocr_batch_pages,
         })
     }
+    pub const fn max_ocr_batch_pages(&self) -> usize {
+        self.max_ocr_batch_pages
+    }
 
     pub async fn prepare(&self, document: &Document) -> Result<u32> {
         let source = self.layout.object_path(&document.content_hash);
@@ -53,6 +57,13 @@ impl PreviewService {
             self.generate_thumbnail(document, page).await?;
         }
         Ok(page_count)
+    }
+    pub fn prepare_owned(
+        &self,
+        document: Document,
+    ) -> impl Future<Output = Result<u32>> + Send + 'static {
+        let service = self.clone();
+        async move { service.prepare(&document).await }
     }
 
     pub async fn ensure_thumbnail(&self, document: &Document, page: u32) -> Result<PathBuf> {
@@ -128,6 +139,19 @@ impl PreviewService {
                 }
                 Ok(pages)
             }
+        }
+    }
+    pub fn render_ocr_batch_owned(
+        &self,
+        document: Document,
+        first_page: u32,
+        page_count: u32,
+    ) -> impl Future<Output = Result<Vec<PageImage>>> + Send + 'static {
+        let service = self.clone();
+        async move {
+            service
+                .render_ocr_batch(&document, first_page, page_count)
+                .await
         }
     }
 

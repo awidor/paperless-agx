@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 image.workspace = true
 paperless-models = { path = "../models" }
 paperless-ocr-client = { path = "../ocr-client" }
@@ -15,5 +16,6 @@ tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+
 [dev-dependencies]
-chrono.workspace = true
+url.workspace = true

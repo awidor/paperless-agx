@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     str::FromStr,
     sync::{
         Arc,
@@ -64,19 +65,24 @@ impl DocumentRepository {
         Ok(())
     }
 
-    pub async fn get(&self, document_id: u64) -> Result<Option<Document>> {
-        let batches = self
-            .table
-            .query()
-            .only_if(format!("document_id = {document_id}"))
-            .limit(1)
-            .execute()
-            .await
-            .context("query document by id")?
-            .try_collect::<Vec<_>>()
-            .await
-            .context("read document by id")?;
-        documents_from_batches(&batches).map(|mut documents| documents.pop())
+    pub fn get(
+        &self,
+        document_id: u64,
+    ) -> impl Future<Output = Result<Option<Document>>> + Send + 'static {
+        let table = self.table.clone();
+        async move {
+            let batches = table
+                .query()
+                .only_if(format!("document_id = {document_id}"))
+                .limit(1)
+                .execute()
+                .await
+                .context("query document by id")?
+                .try_collect::<Vec<_>>()
+                .await
+                .context("read document by id")?;
+            documents_from_batches(&batches).map(|mut documents| documents.pop())
+        }
     }
 
     pub async fn find_by_hash(&self, content_hash: &[u8; 32]) -> Result<Option<Document>> {
@@ -117,11 +123,11 @@ impl DocumentRepository {
         Ok(documents)
     }
 
-    pub async fn list_resumable_pre_ocr(&self) -> Result<Vec<Document>> {
+    pub async fn list_resumable_ingestion(&self) -> Result<Vec<Document>> {
         let batches = self
             .table
             .query()
-            .only_if("deleted_at IS NULL AND status IN ('STORED', 'PREVIEWING')")
+            .only_if("deleted_at IS NULL AND status IN ('STORED', 'PREVIEWING', 'OCR')")
             .execute()
             .await
             .context("query resumable documents")?
@@ -131,38 +137,47 @@ impl DocumentRepository {
         documents_from_batches(&batches)
     }
 
-    pub async fn set_status(
+    pub fn set_status(
         &self,
         document_id: u64,
         status: IngestionStatus,
-        last_error: Option<&str>,
-    ) -> Result<()> {
-        let mut update = self
-            .table
-            .update()
-            .only_if(format!("document_id = {document_id}"))
-            .column("status", sql_string(status.as_str()))
-            .column("updated_at", "now()");
-        update = match last_error {
-            Some(error) => update.column("last_error", sql_string(error)),
-            None => update.column("last_error", "NULL"),
-        };
-        update.execute().await.context("update document status")?;
-        Ok(())
+        last_error: Option<String>,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        let table = self.table.clone();
+        async move {
+            let mut update = table
+                .update()
+                .only_if(format!("document_id = {document_id}"))
+                .column("status", sql_string(status.as_str()))
+                .column("updated_at", "now()");
+            update = match last_error {
+                Some(error) => update.column("last_error", sql_string(&error)),
+                None => update.column("last_error", "NULL"),
+            };
+            update.execute().await.context("update document status")?;
+            Ok(())
+        }
     }
 
-    pub async fn set_preview_ready(&self, document_id: u64, page_count: u32) -> Result<()> {
-        self.table
-            .update()
-            .only_if(format!("document_id = {document_id}"))
-            .column("page_count", page_count.to_string())
-            .column("status", sql_string(IngestionStatus::Ocr.as_str()))
-            .column("last_error", "NULL")
-            .column("updated_at", "now()")
-            .execute()
-            .await
-            .context("store preview result")?;
-        Ok(())
+    pub fn set_preview_ready(
+        &self,
+        document_id: u64,
+        page_count: u32,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        let table = self.table.clone();
+        async move {
+            table
+                .update()
+                .only_if(format!("document_id = {document_id}"))
+                .column("page_count", page_count.to_string())
+                .column("status", sql_string(IngestionStatus::Ocr.as_str()))
+                .column("last_error", "NULL")
+                .column("updated_at", "now()")
+                .execute()
+                .await
+                .context("store preview result")?;
+            Ok(())
+        }
     }
 
     pub async fn mark_retry(&self, document_id: u64) -> Result<()> {

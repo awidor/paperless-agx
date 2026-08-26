@@ -161,9 +161,18 @@ pub struct UploadMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentPage {
+    pub document_id: u64,
+    pub page: u32,
+    pub text: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageInfo {
     pub page: u32,
     pub thumbnail_ready: bool,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

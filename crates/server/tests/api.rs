@@ -1,9 +1,10 @@
 use std::{io::Cursor, path::Path, time::Duration};
 
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
     http::{Request, StatusCode, header},
+    routing::post,
 };
 use chrono::Utc;
 use http_body_util::BodyExt;
@@ -15,7 +16,7 @@ use paperless_storage::{DataLayout, DocumentRepository, ObjectStore};
 use tower::ServiceExt;
 use url::Url;
 
-fn config(data_dir: &Path) -> AppConfig {
+fn config(data_dir: &Path, base_url: Url) -> AppConfig {
     AppConfig {
         data_dir: data_dir.to_path_buf(),
         listen_addr: "0.0.0.0:0".parse().unwrap(),
@@ -23,13 +24,34 @@ fn config(data_dir: &Path) -> AppConfig {
         render_concurrency: 2,
         eager_thumbnail_pages: 3,
         ocr: OcrConfig {
-            base_url: Url::parse("http://localhost:8000/v1").unwrap(),
-            model: "unavailable-test-model".into(),
-            api_key_env: "PAPERLESS_TEST_MISSING_OCR_KEY".into(),
+            base_url,
+            model: "datalab-to/surya-ocr-2".into(),
+            api_key_env: "PATH".into(),
             max_concurrency: 2,
             pages_per_request: 4,
         },
     }
+}
+
+async fn start_ocr() -> Url {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>Recognized page text</p></div>"
+                    }
+                }]
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    Url::parse(&format!("http://{address}/v1")).unwrap()
 }
 
 fn png() -> Vec<u8> {
@@ -95,24 +117,26 @@ async fn get_document(app: &Router, document_id: u64) -> Document {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
-async fn wait_for_ocr_boundary(app: &Router, document_id: u64) -> Document {
-    for _ in 0..100 {
+async fn wait_for_text_ready(app: &Router, document_id: u64) -> Document {
+    for _ in 0..200 {
         let document = get_document(app, document_id).await;
-        if document.status == IngestionStatus::Ocr {
+        if document.status == IngestionStatus::TextReady {
             return document;
         }
         if document.status == IngestionStatus::Failed {
-            panic!("preview failed: {:?}", document.last_error);
+            panic!("ingestion failed: {:?}", document.last_error);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("document did not reach the OCR boundary");
+    panic!("document did not reach TEXT_READY");
 }
 
 #[tokio::test]
 async fn health_upload_duplicate_read_and_image_preview_work() {
     let temporary = tempfile::tempdir().unwrap();
-    let app = build_app(config(temporary.path())).await.unwrap();
+    let app = build_app(config(temporary.path(), start_ocr().await))
+        .await
+        .unwrap();
 
     let health = app
         .clone()
@@ -123,12 +147,12 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
     let health_json: serde_json::Value =
         serde_json::from_slice(&health.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(health_json["status"], "ok");
-    assert_eq!(health_json["ocr_configured"], false);
+    assert_eq!(health_json["ocr_configured"], true);
 
     let image = png();
     let (status, uploaded) = upload(&app, "scan.png", "image/png", &image, "Original title").await;
     assert_eq!(status, StatusCode::CREATED);
-    let ready = wait_for_ocr_boundary(&app, uploaded.document_id).await;
+    let ready = wait_for_text_ready(&app, uploaded.document_id).await;
     assert_eq!(ready.page_count, 1);
 
     let (duplicate_status, duplicate) = upload(
@@ -177,6 +201,7 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
         serde_json::from_slice(&pages.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(pages_json.as_array().unwrap().len(), 1);
     assert_eq!(pages_json[0]["thumbnail_ready"], true);
+    assert_eq!(pages_json[0]["text"], "Recognized page text");
 
     let thumbnail = app
         .clone()
@@ -236,20 +261,64 @@ async fn startup_resumes_a_stored_image() {
     repository.insert(&document).await.unwrap();
     drop(repository);
 
-    let app = build_app(config(temporary.path())).await.unwrap();
-    let resumed = wait_for_ocr_boundary(&app, document.document_id).await;
+    let app = build_app(config(temporary.path(), start_ocr().await))
+        .await
+        .unwrap();
+    let resumed = wait_for_text_ready(&app, document.document_id).await;
+    assert_eq!(resumed.page_count, 1);
+}
+
+#[tokio::test]
+async fn startup_resumes_an_image_at_the_ocr_stage() {
+    let temporary = tempfile::tempdir().unwrap();
+    let layout = DataLayout::create(temporary.path()).await.unwrap();
+    let repository = DocumentRepository::open(&layout).await.unwrap();
+    let object = ObjectStore::new(layout)
+        .store(png().as_slice())
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let document = Document {
+        document_id: repository.allocate_id(),
+        content_hash: object.content_hash,
+        media_type: MediaType::Image,
+        filename: "waiting-for-ocr.png".into(),
+        title: None,
+        document_type: None,
+        created_at: None,
+        added_at: now,
+        updated_at: now,
+        title_source: None,
+        type_source: None,
+        created_at_source: None,
+        page_count: 1,
+        file_size: object.file_size,
+        status: IngestionStatus::Ocr,
+        last_error: None,
+        retry_count: 0,
+        deleted_at: None,
+    };
+    repository.insert(&document).await.unwrap();
+    drop(repository);
+
+    let app = build_app(config(temporary.path(), start_ocr().await))
+        .await
+        .unwrap();
+    let resumed = wait_for_text_ready(&app, document.document_id).await;
     assert_eq!(resumed.page_count, 1);
 }
 
 #[tokio::test]
 async fn pdf_upload_generates_pages_and_thumbnail() {
     let temporary = tempfile::tempdir().unwrap();
-    let app = build_app(config(temporary.path())).await.unwrap();
+    let app = build_app(config(temporary.path(), start_ocr().await))
+        .await
+        .unwrap();
     let pdf = one_page_pdf();
     let (status, uploaded) =
         upload(&app, "one-page.pdf", "application/pdf", &pdf, "Blank PDF").await;
     assert_eq!(status, StatusCode::CREATED);
-    let ready = wait_for_ocr_boundary(&app, uploaded.document_id).await;
+    let ready = wait_for_text_ready(&app, uploaded.document_id).await;
     assert_eq!(ready.media_type, MediaType::Pdf);
     assert_eq!(ready.page_count, 1);
 }

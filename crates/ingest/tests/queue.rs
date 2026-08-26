@@ -3,13 +3,15 @@ use std::time::Duration;
 use chrono::Utc;
 use paperless_ingest::{IngestionQueue, PreviewService};
 use paperless_models::{Document, IngestionStatus, MediaType};
-use paperless_storage::{DataLayout, DocumentRepository, ObjectStore};
+use paperless_ocr_client::{OcrClient, OcrConfig};
+use paperless_storage::{DataLayout, DocumentRepository, ObjectStore, PageRepository};
 
 #[tokio::test]
 async fn failure_is_persisted_and_manual_retry_is_counted() {
     let temporary = tempfile::tempdir().unwrap();
     let layout = DataLayout::create(temporary.path()).await.unwrap();
     let repository = DocumentRepository::open(&layout).await.unwrap();
+    let pages = PageRepository::open(&layout).await.unwrap();
     let object = ObjectStore::new(layout.clone())
         .store(b"not an image".as_slice())
         .await
@@ -37,7 +39,15 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
     };
     repository.insert(&document).await.unwrap();
     let previews = PreviewService::new(layout, 1, 1, 1).unwrap();
-    let queue = IngestionQueue::start(repository.clone(), previews, 1, 1, 1)
+    let ocr = OcrClient::from_environment(OcrConfig {
+        base_url: url::Url::parse("http://127.0.0.1:1/v1").unwrap(),
+        model: "datalab-to/surya-ocr-2".into(),
+        api_key_env: "PATH".into(),
+        max_concurrency: 1,
+        pages_per_request: 1,
+    })
+    .unwrap();
+    let queue = IngestionQueue::start(repository.clone(), pages, previews, ocr, 1, 1)
         .await
         .unwrap();
 

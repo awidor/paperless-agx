@@ -11,7 +11,7 @@ use axum::{
 };
 use paperless_ingest::{IngestionQueue, PreviewService};
 use paperless_ocr_client::OcrClient;
-use paperless_storage::{DataLayout, DocumentRepository, ObjectStore};
+use paperless_storage::{DataLayout, DocumentRepository, ObjectStore, PageRepository};
 use tokio::sync::Mutex;
 use tower_http::{catch_panic::CatchPanicLayer, trace::TraceLayer};
 
@@ -22,6 +22,7 @@ pub use routes::AppError;
 pub struct AppState {
     pub layout: DataLayout,
     pub documents: DocumentRepository,
+    pub pages: PageRepository,
     pub objects: ObjectStore,
     pub previews: PreviewService,
     pub ingestion: IngestionQueue,
@@ -33,6 +34,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
     config.check()?;
     let layout = DataLayout::create(&config.data_dir).await?;
     let documents = DocumentRepository::open(&layout).await?;
+    let pages = PageRepository::open(&layout).await?;
     let objects = ObjectStore::new(layout.clone());
     let previews = PreviewService::new(
         layout.clone(),
@@ -43,15 +45,17 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
     let ocr = OcrClient::from_environment(config.ocr)?;
     let ingestion = IngestionQueue::start(
         documents.clone(),
+        pages.clone(),
         previews.clone(),
+        ocr.clone(),
         config.queue_capacity,
         config.render_concurrency,
-        2,
     )
     .await?;
     let state = AppState {
         layout,
         documents,
+        pages,
         objects,
         previews,
         ingestion,

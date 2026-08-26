@@ -1,10 +1,15 @@
-use std::{collections::HashSet, io::ErrorKind, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result, bail};
-use paperless_models::IngestionStatus;
-use paperless_storage::DocumentRepository;
-use tokio::sync::{Mutex, Semaphore, mpsc};
-use tracing::{error, warn};
+use chrono::Utc;
+use paperless_models::{Document, DocumentPage, IngestionStatus};
+use paperless_ocr_client::OcrClient;
+use paperless_storage::{DocumentRepository, PageRepository};
+use tokio::sync::{Semaphore, mpsc};
+use tracing::error;
 
 use crate::PreviewService;
 
@@ -17,10 +22,11 @@ pub struct IngestionQueue {
 impl IngestionQueue {
     pub async fn start(
         repository: DocumentRepository,
+        pages: PageRepository,
         previews: PreviewService,
+        ocr: OcrClient,
         capacity: usize,
         job_concurrency: usize,
-        transient_retry_limit: u32,
     ) -> Result<Self> {
         if capacity == 0 {
             bail!("queue_capacity must be greater than zero");
@@ -35,12 +41,13 @@ impl IngestionQueue {
         };
         tokio::spawn(run_dispatcher(
             receiver,
-            repository.clone(),
+            Arc::new(repository.clone()),
+            Arc::new(pages),
             previews,
+            ocr,
             job_concurrency,
-            transient_retry_limit,
         ));
-        for document in repository.list_resumable_pre_ocr().await? {
+        for document in repository.list_resumable_ingestion().await? {
             queue.enqueue(document.document_id).await?;
         }
         Ok(queue)
@@ -69,16 +76,17 @@ impl IngestionQueue {
 
 async fn run_dispatcher(
     mut receiver: mpsc::Receiver<u64>,
-    repository: DocumentRepository,
+    repository: Arc<DocumentRepository>,
+    pages: Arc<PageRepository>,
     previews: PreviewService,
+    ocr: OcrClient,
     job_concurrency: usize,
-    transient_retry_limit: u32,
 ) {
     let job_gate = Arc::new(Semaphore::new(job_concurrency));
     let active = Arc::new(Mutex::new(HashSet::new()));
     while let Some(document_id) = receiver.recv().await {
         {
-            let mut active = active.lock().await;
+            let mut active = active.lock().expect("ingestion active set poisoned");
             if !active.insert(document_id) {
                 continue;
             }
@@ -88,66 +96,126 @@ async fn run_dispatcher(
             Err(_) => break,
         };
         let repository = repository.clone();
+        let pages = pages.clone();
         let previews = previews.clone();
+        let ocr = ocr.clone();
         let active = active.clone();
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(error) =
-                process_document(&repository, &previews, document_id, transient_retry_limit).await
+                process_document(repository, pages, previews, ocr, document_id).await
             {
                 error!(document_id, error = %error, "ingestion state update failed");
             }
-            active.lock().await.remove(&document_id);
+            active
+                .lock()
+                .expect("ingestion active set poisoned")
+                .remove(&document_id);
         });
     }
 }
 
 async fn process_document(
-    repository: &DocumentRepository,
-    previews: &PreviewService,
+    repository: Arc<DocumentRepository>,
+    pages: Arc<PageRepository>,
+    previews: PreviewService,
+    ocr: OcrClient,
     document_id: u64,
-    transient_retry_limit: u32,
 ) -> Result<()> {
-    let document = match repository.get(document_id).await? {
+    let mut document = match repository.get(document_id).await? {
         Some(document) if document.deleted_at.is_none() => document,
         _ => return Ok(()),
     };
-    repository
-        .set_status(document_id, IngestionStatus::Previewing, None)
-        .await?;
 
-    let mut attempt = 0;
-    loop {
-        match previews.prepare(&document).await {
+    if matches!(
+        document.status,
+        IngestionStatus::Stored | IngestionStatus::Previewing
+    ) {
+        repository
+            .set_status(document_id, IngestionStatus::Previewing, None)
+            .await?;
+        match previews.prepare_owned(document.clone()).await {
             Ok(page_count) => {
                 repository
                     .set_preview_ready(document_id, page_count)
                     .await?;
-                return Ok(());
-            }
-            Err(error) if attempt < transient_retry_limit && is_transient(&error) => {
-                attempt += 1;
-                warn!(document_id, attempt, error = %error, "transient preview failure");
-                tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt))).await;
+                document.page_count = page_count;
+                document.status = IngestionStatus::Ocr;
             }
             Err(error) => {
-                let message = format!("preview failed: {error:#}");
-                repository
-                    .set_status(document_id, IngestionStatus::Failed, Some(&message))
-                    .await?;
+                fail_document(
+                    repository.clone(),
+                    document_id,
+                    format!("preview failed: {error:#}"),
+                )
+                .await?;
                 return Ok(());
             }
         }
     }
+
+    if document.status == IngestionStatus::Ocr {
+        match recognize_document(previews.clone(), ocr.clone(), document.clone()).await {
+            Ok(recognized) => {
+                pages
+                    .replace_document_pages(document_id, recognized)
+                    .await?;
+                repository
+                    .set_status(document_id, IngestionStatus::TextReady, None)
+                    .await?;
+            }
+            Err(error) => {
+                fail_document(
+                    repository.clone(),
+                    document_id,
+                    format!("OCR failed: {error:#}"),
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
 }
 
-fn is_transient(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-            matches!(
-                error.kind(),
-                ErrorKind::Interrupted | ErrorKind::TimedOut | ErrorKind::WouldBlock
-            )
-        })
-    })
+async fn recognize_document(
+    previews: PreviewService,
+    ocr: OcrClient,
+    document: Document,
+) -> Result<Vec<DocumentPage>> {
+    let batch_size = previews.max_ocr_batch_pages() as u32;
+    let mut recognized = Vec::with_capacity(document.page_count as usize);
+    let mut first_page = 1;
+    while first_page <= document.page_count {
+        let count = batch_size.min(document.page_count - first_page + 1);
+        let images = previews
+            .render_ocr_batch_owned(document.clone(), first_page, count)
+            .await?;
+        let batch = ocr.recognize_pages(images).await?;
+        recognized.extend(batch.into_iter().map(|page| DocumentPage {
+            document_id: document.document_id,
+            page: page.page,
+            text: page.text,
+            updated_at: Utc::now(),
+        }));
+        first_page += count;
+    }
+    if recognized.len() != document.page_count as usize {
+        bail!(
+            "OCR returned {} pages for a {} page document",
+            recognized.len(),
+            document.page_count
+        );
+    }
+    recognized.sort_by_key(|page| page.page);
+    Ok(recognized)
+}
+
+async fn fail_document(
+    repository: Arc<DocumentRepository>,
+    document_id: u64,
+    message: String,
+) -> Result<()> {
+    repository
+        .set_status(document_id, IngestionStatus::Failed, Some(message))
+        .await
 }
