@@ -1,10 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::qwen3::{Config, Model};
 use tokenizers::Tokenizer;
+use tokio::sync::Semaphore;
 
 pub const HARRIER_MODEL_ID: &str = "microsoft/harrier-oss-v1-0.6b";
 pub const HARRIER_REVISION: &str = "f9b9dc8d367d443f2479d27aa5d8d2850c0774ee";
@@ -149,6 +153,63 @@ impl Harrier {
             );
         }
         Ok(embedding)
+    }
+}
+
+#[derive(Clone)]
+pub struct EmbeddingService {
+    model: Arc<Mutex<Harrier>>,
+    gate: Arc<Semaphore>,
+}
+
+impl EmbeddingService {
+    pub async fn load(model_directory: impl AsRef<Path>, max_concurrency: usize) -> Result<Self> {
+        if max_concurrency == 0 {
+            bail!("embedding max_concurrency must be greater than zero");
+        }
+        let directory = model_directory.as_ref().to_path_buf();
+        let model = tokio::task::spawn_blocking(move || Harrier::load(directory))
+            .await
+            .context("Harrier loading task stopped")??;
+        Ok(Self {
+            model: Arc::new(Mutex::new(model)),
+            gate: Arc::new(Semaphore::new(max_concurrency)),
+        })
+    }
+
+    pub async fn embed_documents(&self, documents: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        self.embed_batch(documents, false).await
+    }
+
+    pub async fn embed_query(&self, query: String) -> Result<Vec<f32>> {
+        self.embed_batch(vec![query], true)
+            .await?
+            .pop()
+            .context("Harrier returned no query embedding")
+    }
+
+    async fn embed_batch(&self, inputs: Vec<String>, query: bool) -> Result<Vec<Vec<f32>>> {
+        let permit = self
+            .gate
+            .clone()
+            .acquire_owned()
+            .await
+            .context("embedding gate closed")?;
+        let model = self.model.clone();
+        tokio::task::spawn_blocking(move || {
+            let model = model
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Harrier model lock is poisoned"))?;
+            let result = if query {
+                model.embed_queries(&inputs)
+            } else {
+                model.embed_documents(&inputs)
+            };
+            drop(permit);
+            result
+        })
+        .await
+        .context("Harrier embedding task stopped")?
     }
 }
 

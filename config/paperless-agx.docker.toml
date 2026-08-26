@@ -1,15 +1,15 @@
-data_dir = "data"
+data_dir = "/data"
 listen_addr = "0.0.0.0:3000"
 queue_capacity = 16
 render_concurrency = 2
 eager_thumbnail_pages = 3
 
 [embeddings]
-model_dir = "data/models/harrier-oss-v1-0.6b"
+model_dir = "/opt/paperless/models/harrier-oss-v1-0.6b"
 max_concurrency = 1
 
 [ocr]
-base_url = "http://127.0.0.1:8765/v1"
+base_url = "http://host.docker.internal:8765/v1"
 model = "datalab-to/surya-ocr-2"
 api_key_env = "OCR_API_KEY"
 max_concurrency = 1

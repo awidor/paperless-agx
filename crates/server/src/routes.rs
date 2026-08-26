@@ -4,15 +4,18 @@ use anyhow::{Context, Result};
 use axum::{
     Json,
     body::Body,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use paperless_models::{
-    Document, HealthResponse, IngestionStatus, MediaType, MetadataSource, PageInfo, UploadMetadata,
+    Document, DocumentPageResult, DocumentPatch, DocumentQuery, DocumentSort, HealthResponse,
+    IngestionStatus, MediaType, MetadataSource, PageInfo, SearchHit, SearchRequest, SearchResponse,
+    UploadMetadata,
 };
+use paperless_search::{RankedChunk, collapse_to_documents, reciprocal_rank_fusion};
 use paperless_storage::StoredObject;
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -25,6 +28,8 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         ocr_configured: state.ocr.configured(),
         ocr_base_url: state.ocr.config().base_url.to_string(),
         ocr_model: state.ocr.config().model.clone(),
+        embedding_configured: state.embeddings.is_some(),
+        embedding_model: paperless_embeddings::HARRIER_MODEL_ID,
     })
 }
 
@@ -150,8 +155,45 @@ pub async fn upload_document(
 
 pub async fn list_documents(
     State(state): State<AppState>,
-) -> Result<Json<Vec<Document>>, AppError> {
-    Ok(Json(state.documents.list_active().await?))
+    Query(query): Query<DocumentQuery>,
+) -> Result<Json<DocumentPageResult>, AppError> {
+    if query.page == 0 || !(1..=100).contains(&query.page_size) {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "page must start at one and page_size must be between 1 and 100"
+        )));
+    }
+    let mut documents = state
+        .documents
+        .list_active()
+        .await?
+        .into_iter()
+        .filter(|document| {
+            query
+                .document_type
+                .as_ref()
+                .is_none_or(|value| document.document_type.as_ref() == Some(value))
+                && query
+                    .created_from
+                    .is_none_or(|date| document.created_at.is_some_and(|value| value >= date))
+                && query
+                    .created_to
+                    .is_none_or(|date| document.created_at.is_some_and(|value| value <= date))
+        })
+        .collect::<Vec<_>>();
+    sort_documents(&mut documents, query.sort);
+    let total = documents.len() as u64;
+    let start = ((query.page - 1) * query.page_size) as usize;
+    let items = documents
+        .into_iter()
+        .skip(start)
+        .take(query.page_size as usize)
+        .collect();
+    Ok(Json(DocumentPageResult {
+        items,
+        page: query.page,
+        page_size: query.page_size,
+        total,
+    }))
 }
 
 pub async fn get_document(
@@ -159,6 +201,119 @@ pub async fn get_document(
     Path(document_id): Path<u64>,
 ) -> Result<Json<Document>, AppError> {
     Ok(Json(active_document(&state, document_id).await?))
+}
+
+pub async fn patch_document(
+    State(state): State<AppState>,
+    Path(document_id): Path<u64>,
+    Json(patch): Json<DocumentPatch>,
+) -> Result<Json<Document>, AppError> {
+    active_document(&state, document_id).await?;
+    state
+        .metadata
+        .apply_manual(document_id, patch)
+        .await
+        .map(Json)
+        .map_err(AppError::bad_request)
+}
+
+pub async fn delete_document(
+    State(state): State<AppState>,
+    Path(document_id): Path<u64>,
+) -> Result<StatusCode, AppError> {
+    active_document(&state, document_id).await?;
+    state.documents.soft_delete(document_id).await?;
+    state.cleanup.enqueue(document_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn document_types(State(state): State<AppState>) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(state.documents.document_types().await?))
+}
+
+pub async fn search(
+    State(state): State<AppState>,
+    Json(request): Json<SearchRequest>,
+) -> Result<Json<SearchResponse>, AppError> {
+    if request.query.trim().is_empty() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "search query must not be empty"
+        )));
+    }
+    if request.page == 0 || !(1..=100).contains(&request.page_size) {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "page must start at one and page_size must be between 1 and 100"
+        )));
+    }
+    let embeddings = state.embeddings.as_ref().ok_or_else(|| {
+        AppError::service_unavailable(anyhow::anyhow!("embedding model is not configured"))
+    })?;
+    let query_embedding = embeddings
+        .embed_query(request.query.trim().to_owned())
+        .await?;
+    let filter = search_filter(&request);
+    let lexical = state
+        .chunks
+        .lexical_candidates(&request.query, filter.as_deref(), 50)
+        .await?;
+    let vector = state
+        .chunks
+        .vector_candidates(&query_embedding, filter.as_deref(), 50)
+        .await?;
+    let ranked = |matches: Vec<paperless_search::ChunkMatch>| {
+        matches
+            .into_iter()
+            .map(|candidate| RankedChunk {
+                chunk_id: candidate.chunk.chunk_id,
+                document_id: candidate.chunk.document_id,
+                rank: candidate.rank,
+                score: candidate.score,
+            })
+            .collect::<Vec<_>>()
+    };
+    let fused = reciprocal_rank_fusion(&ranked(lexical), &ranked(vector), 60.0);
+    let ranked_documents = collapse_to_documents(&fused);
+    let mut documents = Vec::with_capacity(ranked_documents.len());
+    for hit in ranked_documents {
+        let Some(document) = state.documents.get(hit.document_id).await? else {
+            continue;
+        };
+        if document.deleted_at.is_none() {
+            documents.push((hit, document));
+        }
+    }
+    let total = documents.len() as u64;
+    let start = ((request.page - 1) * request.page_size) as usize;
+    let mut items = Vec::new();
+    for (hit, document) in documents
+        .into_iter()
+        .skip(start)
+        .take(request.page_size as usize)
+    {
+        let Some(chunk) = state.chunks.get(hit.best_chunk_id).await? else {
+            continue;
+        };
+        items.push(SearchHit {
+            document,
+            best_chunk_id: chunk.chunk_id,
+            page: chunk.page_start,
+            snippet: chunk.text,
+            score: hit.score,
+        });
+    }
+    Ok(Json(SearchResponse {
+        items,
+        page: request.page,
+        page_size: request.page_size,
+        total,
+    }))
+}
+
+pub async fn openapi() -> Json<serde_json::Value> {
+    Json(
+        serde_json::from_str(include_str!("../../../openapi.json"))
+            .expect("committed OpenAPI schema must be valid JSON"),
+    )
 }
 
 pub async fn get_file(
@@ -232,6 +387,72 @@ pub async fn retry_document(
         .await?
         .context("document disappeared after retry")?;
     Ok(Json(document))
+}
+
+fn sort_documents(documents: &mut [Document], sort: DocumentSort) {
+    documents.sort_by(|left, right| match sort {
+        DocumentSort::DocumentDateDesc => right
+            .created_at
+            .unwrap_or(right.added_at)
+            .cmp(&left.created_at.unwrap_or(left.added_at))
+            .then_with(|| right.document_id.cmp(&left.document_id)),
+        DocumentSort::DocumentDateAsc => left
+            .created_at
+            .unwrap_or(left.added_at)
+            .cmp(&right.created_at.unwrap_or(right.added_at))
+            .then_with(|| left.document_id.cmp(&right.document_id)),
+        DocumentSort::AddedDateDesc => right
+            .added_at
+            .cmp(&left.added_at)
+            .then_with(|| right.document_id.cmp(&left.document_id)),
+        DocumentSort::AddedDateAsc => left
+            .added_at
+            .cmp(&right.added_at)
+            .then_with(|| left.document_id.cmp(&right.document_id)),
+        DocumentSort::TitleAsc => left
+            .title
+            .as_deref()
+            .unwrap_or("")
+            .cmp(right.title.as_deref().unwrap_or(""))
+            .then_with(|| left.document_id.cmp(&right.document_id)),
+        DocumentSort::TitleDesc => right
+            .title
+            .as_deref()
+            .unwrap_or("")
+            .cmp(left.title.as_deref().unwrap_or(""))
+            .then_with(|| right.document_id.cmp(&left.document_id)),
+        DocumentSort::FileSizeAsc => left
+            .file_size
+            .cmp(&right.file_size)
+            .then_with(|| left.document_id.cmp(&right.document_id)),
+        DocumentSort::FileSizeDesc => right
+            .file_size
+            .cmp(&left.file_size)
+            .then_with(|| right.document_id.cmp(&left.document_id)),
+    });
+}
+
+fn search_filter(request: &SearchRequest) -> Option<String> {
+    let mut filters = Vec::new();
+    if let Some(document_type) = request.document_type.as_deref() {
+        filters.push(format!(
+            "document_type = '{}'",
+            document_type.replace('\'', "''")
+        ));
+    }
+    if let Some(created_from) = request.created_from {
+        filters.push(format!(
+            "created_at >= to_timestamp_micros({})",
+            created_from.timestamp_micros()
+        ));
+    }
+    if let Some(created_to) = request.created_to {
+        filters.push(format!(
+            "created_at <= to_timestamp_micros({})",
+            created_to.timestamp_micros()
+        ));
+    }
+    (!filters.is_empty()).then(|| filters.join(" AND "))
 }
 
 async fn active_document(state: &AppState, document_id: u64) -> Result<Document, AppError> {
@@ -312,6 +533,13 @@ impl AppError {
     fn not_found(source: anyhow::Error) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            source,
+        }
+    }
+
+    fn service_unavailable(source: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             source,
         }
     }

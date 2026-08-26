@@ -90,7 +90,9 @@ impl DocumentRepository {
         let batches = self
             .table
             .query()
-            .only_if(format!("content_hash = X'{literal}'"))
+            .only_if(format!(
+                "content_hash = X'{literal}' AND deleted_at IS NULL"
+            ))
             .limit(1)
             .execute()
             .await
@@ -127,7 +129,7 @@ impl DocumentRepository {
         let batches = self
             .table
             .query()
-            .only_if("deleted_at IS NULL AND status IN ('STORED', 'PREVIEWING', 'OCR')")
+            .only_if("deleted_at IS NULL AND status IN ('STORED', 'PREVIEWING', 'OCR', 'TEXT_READY', 'EMBEDDING', 'INDEXING')")
             .execute()
             .await
             .context("query resumable documents")?
@@ -244,6 +246,86 @@ impl DocumentRepository {
         self.get(existing.document_id)
             .await?
             .context("duplicate document disappeared after metadata merge")
+    }
+
+    pub async fn write_metadata(&self, document: &Document) -> Result<()> {
+        let update = self
+            .table
+            .update()
+            .only_if(format!("document_id = {}", document.document_id))
+            .column("title", sql_optional_string(document.title.as_deref()))
+            .column(
+                "document_type",
+                sql_optional_string(document.document_type.as_deref()),
+            )
+            .column("created_at", sql_optional_timestamp(document.created_at))
+            .column("title_source", sql_optional_source(document.title_source))
+            .column("type_source", sql_optional_source(document.type_source))
+            .column(
+                "created_at_source",
+                sql_optional_source(document.created_at_source),
+            )
+            .column("updated_at", "now()");
+        update.execute().await.context("write document metadata")?;
+        Ok(())
+    }
+
+    pub async fn soft_delete(&self, document_id: u64) -> Result<()> {
+        self.table
+            .update()
+            .only_if(format!(
+                "document_id = {document_id} AND deleted_at IS NULL"
+            ))
+            .column("deleted_at", "now()")
+            .column("updated_at", "now()")
+            .execute()
+            .await
+            .context("soft delete document")?;
+        Ok(())
+    }
+
+    pub async fn list_deleted(&self) -> Result<Vec<Document>> {
+        let batches = self
+            .table
+            .query()
+            .only_if("deleted_at IS NOT NULL")
+            .execute()
+            .await
+            .context("query deleted documents")?
+            .try_collect::<Vec<_>>()
+            .await
+            .context("read deleted documents")?;
+        documents_from_batches(&batches)
+    }
+
+    pub async fn has_active_hash(&self, content_hash: &[u8; 32]) -> Result<bool> {
+        let literal = hash_hex(content_hash);
+        let batches = self
+            .table
+            .query()
+            .only_if(format!(
+                "content_hash = X'{literal}' AND deleted_at IS NULL"
+            ))
+            .limit(1)
+            .execute()
+            .await
+            .context("query active document hash")?
+            .try_collect::<Vec<_>>()
+            .await
+            .context("read active document hash")?;
+        Ok(batches.iter().any(|batch| batch.num_rows() > 0))
+    }
+
+    pub async fn document_types(&self) -> Result<Vec<String>> {
+        let mut types = self
+            .list_active()
+            .await?
+            .into_iter()
+            .filter_map(|document| document.document_type)
+            .collect::<Vec<_>>();
+        types.sort_unstable_by_key(|value| value.to_lowercase());
+        types.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        Ok(types)
     }
 }
 
@@ -452,6 +534,26 @@ fn required_timestamp(batch: &RecordBatch, name: &str, row: usize) -> Result<Dat
 
 fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn sql_optional_string(value: Option<&str>) -> String {
+    value.map_or_else(|| "NULL".into(), sql_string)
+}
+
+fn sql_optional_source(value: Option<MetadataSource>) -> String {
+    value.map_or_else(|| "NULL".into(), |source| sql_string(source.as_str()))
+}
+
+fn sql_optional_timestamp(value: Option<DateTime<Utc>>) -> String {
+    value.map_or_else(
+        || "NULL".into(),
+        |date| {
+            format!(
+                "arrow_cast({}, 'Timestamp(Microsecond, Some(\"UTC\"))')",
+                date.timestamp_micros()
+            )
+        },
+    )
 }
 
 #[cfg(test)]

@@ -9,9 +9,11 @@ rust-version.workspace = true
 anyhow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
+chrono.workspace = true
 futures.workspace = true
 lance-index = "10.0.0"
 lancedb.workspace = true
+paperless-models = { path = "../models" }
 serde.workspace = true
 
 [dev-dependencies]

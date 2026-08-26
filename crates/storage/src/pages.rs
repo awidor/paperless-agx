@@ -87,6 +87,15 @@ impl PageRepository {
         pages.sort_by_key(|page| page.page);
         Ok(pages)
     }
+
+    pub async fn delete_document(&self, document_id: u64) -> Result<()> {
+        let predicate = format!("document_id = {document_id}");
+        self.table
+            .delete(&predicate)
+            .await
+            .context("delete document OCR pages")?;
+        Ok(())
+    }
 }
 
 async fn open_or_create_pages(connection: &Connection) -> Result<Table> {

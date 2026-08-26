@@ -23,6 +23,7 @@ fn config(data_dir: &Path, base_url: Url) -> AppConfig {
         queue_capacity: 4,
         render_concurrency: 2,
         eager_thumbnail_pages: 3,
+        embeddings: None,
         ocr: OcrConfig {
             base_url,
             model: "datalab-to/surya-ocr-2".into(),
@@ -226,6 +227,86 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
             .to_bytes()
             .is_empty()
     );
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::patch(format!("/api/documents/{}", uploaded.document_id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"title":"Edited title","document_type":"Receipt","created_at":"2025-02-03T00:00:00Z"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch.status(), StatusCode::OK);
+    let patched: Document =
+        serde_json::from_slice(&patch.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(patched.title.as_deref(), Some("Edited title"));
+    assert_eq!(
+        patched.title_source,
+        Some(paperless_models::MetadataSource::Manual)
+    );
+
+    let listing = app
+        .clone()
+        .oneshot(
+            Request::get("/api/documents?page=1&page_size=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let listing: serde_json::Value =
+        serde_json::from_slice(&listing.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(listing["total"], 1);
+    assert_eq!(listing["items"][0]["document_type"], "Receipt");
+
+    let types = app
+        .clone()
+        .oneshot(
+            Request::get("/api/document-types")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let types: serde_json::Value =
+        serde_json::from_slice(&types.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(types, serde_json::json!(["Receipt"]));
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("/api/documents/{}", uploaded.document_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/documents/{}", uploaded.document_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let object_path = DataLayout::create(temporary.path())
+        .await
+        .unwrap()
+        .object_path(&uploaded.content_hash);
+    for _ in 0..100 {
+        if !object_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!object_path.exists());
 }
 
 #[tokio::test]
@@ -306,6 +387,99 @@ async fn startup_resumes_an_image_at_the_ocr_stage() {
         .unwrap();
     let resumed = wait_for_text_ready(&app, document.document_id).await;
     assert_eq!(resumed.page_count, 1);
+}
+
+#[tokio::test]
+async fn startup_finishes_an_interrupted_index_commit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let layout = DataLayout::create(temporary.path()).await.unwrap();
+    let repository = DocumentRepository::open(&layout).await.unwrap();
+    let now = Utc::now();
+    let document = Document {
+        document_id: repository.allocate_id(),
+        content_hash: [9; 32],
+        media_type: MediaType::Image,
+        filename: "indexed.png".into(),
+        title: None,
+        document_type: None,
+        created_at: None,
+        added_at: now,
+        updated_at: now,
+        title_source: None,
+        type_source: None,
+        created_at_source: None,
+        page_count: 1,
+        file_size: 1,
+        status: IngestionStatus::Indexing,
+        last_error: None,
+        retry_count: 0,
+        deleted_at: None,
+    };
+    repository.insert(&document).await.unwrap();
+    drop(repository);
+
+    let app = build_app(config(temporary.path(), start_ocr().await))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if get_document(&app, document.document_id).await.status == IngestionStatus::Ready {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("document did not finish INDEXING recovery");
+}
+
+#[tokio::test]
+async fn startup_repeats_deleted_object_cleanup_safely() {
+    let temporary = tempfile::tempdir().unwrap();
+    let layout = DataLayout::create(temporary.path()).await.unwrap();
+    let repository = DocumentRepository::open(&layout).await.unwrap();
+    let stored = ObjectStore::new(layout.clone())
+        .store(png().as_slice())
+        .await
+        .unwrap();
+    let object_path = layout.object_path(&stored.content_hash);
+    let now = Utc::now();
+    let document = Document {
+        document_id: repository.allocate_id(),
+        content_hash: stored.content_hash,
+        media_type: MediaType::Image,
+        filename: "deleted.png".into(),
+        title: None,
+        document_type: None,
+        created_at: None,
+        added_at: now,
+        updated_at: now,
+        title_source: None,
+        type_source: None,
+        created_at_source: None,
+        page_count: 1,
+        file_size: stored.file_size,
+        status: IngestionStatus::Ready,
+        last_error: None,
+        retry_count: 0,
+        deleted_at: Some(now),
+    };
+    repository.insert(&document).await.unwrap();
+    drop(repository);
+
+    let app = build_app(config(temporary.path(), start_ocr().await))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if !object_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!object_path.exists());
+    drop(app);
+
+    build_app(config(temporary.path(), start_ocr().await))
+        .await
+        .unwrap();
+    assert!(!object_path.exists());
 }
 
 #[tokio::test]

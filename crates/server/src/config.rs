@@ -8,12 +8,20 @@ use paperless_ocr_client::OcrConfig;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct EmbeddingConfig {
+    pub model_dir: PathBuf,
+    pub max_concurrency: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub data_dir: PathBuf,
     pub listen_addr: SocketAddr,
     pub queue_capacity: usize,
     pub render_concurrency: usize,
     pub eager_thumbnail_pages: u32,
+    #[serde(default)]
+    pub embeddings: Option<EmbeddingConfig>,
     pub ocr: OcrConfig,
 }
 
@@ -36,7 +44,15 @@ impl AppConfig {
         if self.render_concurrency == 0 {
             bail!("render_concurrency must be greater than zero");
         }
-        self.ocr.check()
+        self.ocr.check()?;
+        if self
+            .embeddings
+            .as_ref()
+            .is_some_and(|embedding| embedding.max_concurrency == 0)
+        {
+            bail!("embedding max_concurrency must be greater than zero");
+        }
+        Ok(())
     }
 }
 

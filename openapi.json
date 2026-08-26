@@ -1,0 +1,47 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Paperless AGX API", "version": "0.1.0"},
+  "paths": {
+    "/api/health": {"get": {"operationId": "health", "responses": {"200": {"description": "Health", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HealthResponse"}}}}}}},
+    "/api/documents": {
+      "get": {"operationId": "listDocuments", "parameters": [
+        {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1}},
+        {"name": "page_size", "in": "query", "schema": {"type": "integer", "default": 24}},
+        {"name": "document_type", "in": "query", "schema": {"type": ["string", "null"]}},
+        {"name": "created_from", "in": "query", "schema": {"type": ["string", "null"], "format": "date-time"}},
+        {"name": "created_to", "in": "query", "schema": {"type": ["string", "null"], "format": "date-time"}},
+        {"name": "sort", "in": "query", "schema": {"$ref": "#/components/schemas/DocumentSort"}}
+      ], "responses": {"200": {"description": "Documents", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DocumentPageResult"}}}}}},
+      "post": {"operationId": "uploadDocument", "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {"type": "object", "required": ["file"], "properties": {"file": {"type": "string", "format": "binary"}, "title": {"type": "string"}, "document_type": {"type": "string"}, "created_at": {"type": "string", "format": "date-time"}}}}}}, "responses": {"201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Document"}}}}}}
+    },
+    "/api/documents/{id}": {
+      "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer", "format": "uint64"}}],
+      "get": {"operationId": "getDocument", "responses": {"200": {"description": "Document", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Document"}}}}}},
+      "patch": {"operationId": "patchDocument", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DocumentPatch"}}}}, "responses": {"200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Document"}}}}}},
+      "delete": {"operationId": "deleteDocument", "responses": {"204": {"description": "Deleted"}}}
+    },
+    "/api/documents/{id}/file": {"get": {"operationId": "getDocumentFile", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}], "responses": {"200": {"description": "Original file"}}}},
+    "/api/documents/{id}/pages": {"get": {"operationId": "getDocumentPages", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}], "responses": {"200": {"description": "Pages", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/PageInfo"}}}}}}}},
+    "/api/documents/{id}/thumbnails/{page}": {"get": {"operationId": "getThumbnail", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}, {"name": "page", "in": "path", "required": true, "schema": {"type": "integer"}}], "responses": {"200": {"description": "WebP thumbnail"}}}},
+    "/api/documents/{id}/retry": {"post": {"operationId": "retryDocument", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}], "responses": {"200": {"description": "Retried", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Document"}}}}}}},
+    "/api/search": {"post": {"operationId": "search", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchRequest"}}}}, "responses": {"200": {"description": "Search results", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchResponse"}}}}}}},
+    "/api/document-types": {"get": {"operationId": "documentTypes", "responses": {"200": {"description": "Document types", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "string"}}}}}}}},
+    "/api/openapi.json": {"get": {"operationId": "openapi", "responses": {"200": {"description": "OpenAPI schema"}}}}
+  },
+  "components": {"schemas": {
+    "Document": {"type": "object", "required": ["document_id", "content_hash", "media_type", "filename", "added_at", "updated_at", "page_count", "file_size", "status", "retry_count"], "properties": {
+      "document_id": {"type": "integer", "format": "uint64"}, "content_hash": {"type": "array", "items": {"type": "integer"}}, "media_type": {"type": "string", "enum": ["pdf", "image"]}, "filename": {"type": "string"},
+      "title": {"type": ["string", "null"]}, "document_type": {"type": ["string", "null"]}, "created_at": {"type": ["string", "null"], "format": "date-time"}, "added_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"},
+      "title_source": {"type": ["string", "null"], "enum": ["ai", "manual", null]}, "type_source": {"type": ["string", "null"], "enum": ["ai", "manual", null]}, "created_at_source": {"type": ["string", "null"], "enum": ["ai", "manual", null]},
+      "page_count": {"type": "integer"}, "file_size": {"type": "integer", "format": "uint64"}, "status": {"type": "string", "enum": ["STORED", "PREVIEWING", "OCR", "TEXT_READY", "EMBEDDING", "INDEXING", "READY", "FAILED"]}, "last_error": {"type": ["string", "null"]}, "retry_count": {"type": "integer"}, "deleted_at": {"type": ["string", "null"], "format": "date-time"}
+    }},
+    "DocumentPatch": {"type": "object", "properties": {"title": {"type": ["string", "null"]}, "document_type": {"type": ["string", "null"]}, "created_at": {"type": ["string", "null"], "format": "date-time"}}},
+    "DocumentSort": {"type": "string", "enum": ["document_date_desc", "document_date_asc", "added_date_desc", "added_date_asc", "title_asc", "title_desc", "file_size_asc", "file_size_desc"], "default": "document_date_desc"},
+    "DocumentPageResult": {"type": "object", "required": ["items", "page", "page_size", "total"], "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/Document"}}, "page": {"type": "integer"}, "page_size": {"type": "integer"}, "total": {"type": "integer"}}},
+    "PageInfo": {"type": "object", "required": ["page", "thumbnail_ready"], "properties": {"page": {"type": "integer"}, "thumbnail_ready": {"type": "boolean"}, "text": {"type": ["string", "null"]}}},
+    "SearchRequest": {"type": "object", "required": ["query", "page", "page_size"], "properties": {"query": {"type": "string"}, "page": {"type": "integer"}, "page_size": {"type": "integer"}, "document_type": {"type": ["string", "null"]}, "created_from": {"type": ["string", "null"], "format": "date-time"}, "created_to": {"type": ["string", "null"], "format": "date-time"}}},
+    "SearchHit": {"type": "object", "required": ["document", "best_chunk_id", "page", "snippet", "score"], "properties": {"document": {"$ref": "#/components/schemas/Document"}, "best_chunk_id": {"type": "integer"}, "page": {"type": "integer"}, "snippet": {"type": "string"}, "score": {"type": "number"}}},
+    "SearchResponse": {"type": "object", "required": ["items", "page", "page_size", "total"], "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/SearchHit"}}, "page": {"type": "integer"}, "page_size": {"type": "integer"}, "total": {"type": "integer"}}},
+    "HealthResponse": {"type": "object", "required": ["status", "ocr_configured", "ocr_base_url", "ocr_model", "embedding_configured", "embedding_model"], "properties": {"status": {"type": "string"}, "ocr_configured": {"type": "boolean"}, "ocr_base_url": {"type": "string"}, "ocr_model": {"type": "string"}, "embedding_configured": {"type": "boolean"}, "embedding_model": {"type": "string"}}}
+  }}
+}

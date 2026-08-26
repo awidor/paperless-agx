@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -17,9 +17,15 @@ struct Arguments {
 
 fn main() -> Result<()> {
     let arguments = Arguments::parse();
+    let load_started = Instant::now();
     let harrier = Harrier::load(arguments.model_directory)?;
+    let load_millis = load_started.elapsed().as_millis();
+    let query_started = Instant::now();
     let query = harrier.embed_queries(&[arguments.query])?.remove(0);
+    let query_millis = query_started.elapsed().as_millis();
+    let document_started = Instant::now();
     let document = harrier.embed_documents(&[arguments.document])?.remove(0);
+    let document_millis = document_started.elapsed().as_millis();
     let similarity: f32 = query
         .iter()
         .zip(&document)
@@ -30,6 +36,9 @@ fn main() -> Result<()> {
     println!("revision={HARRIER_REVISION}");
     println!("dimensions={EMBEDDING_DIMENSION}");
     println!("query_l2={:.6}", l2(&query));
+    println!("load_ms={load_millis}");
+    println!("query_embedding_ms={query_millis}");
+    println!("document_embedding_ms={document_millis}");
     println!("document_l2={:.6}", l2(&document));
     println!("similarity={similarity:.6}");
     Ok(())

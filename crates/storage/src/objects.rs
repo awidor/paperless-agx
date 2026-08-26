@@ -110,6 +110,15 @@ impl ObjectStore {
             prefix,
         })
     }
+
+    pub async fn remove(&self, hash: &[u8; 32]) -> Result<()> {
+        let path = self.path(hash);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("remove object {}", path.display())),
+        }
+    }
 }
 
 #[cfg(test)]

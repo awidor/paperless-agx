@@ -5,13 +5,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use paperless_embeddings::EmbeddingService;
 use paperless_models::{Document, DocumentPage, IngestionStatus};
 use paperless_ocr_client::OcrClient;
+use paperless_search::ChunkRepository;
 use paperless_storage::{DocumentRepository, PageRepository};
 use tokio::sync::{Semaphore, mpsc};
-use tracing::error;
+use tracing::{error, warn};
 
-use crate::PreviewService;
+use crate::{MetadataService, PreviewService, chunk_document};
 
 #[derive(Clone)]
 pub struct IngestionQueue {
@@ -20,11 +22,14 @@ pub struct IngestionQueue {
 }
 
 impl IngestionQueue {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         repository: DocumentRepository,
         pages: PageRepository,
+        chunks: ChunkRepository,
         previews: PreviewService,
         ocr: OcrClient,
+        embeddings: Option<EmbeddingService>,
         capacity: usize,
         job_concurrency: usize,
     ) -> Result<Self> {
@@ -39,12 +44,16 @@ impl IngestionQueue {
             sender,
             repository: repository.clone(),
         };
+        let metadata = MetadataService::new(repository.clone(), chunks.clone());
         tokio::spawn(run_dispatcher(
             receiver,
             Arc::new(repository.clone()),
             Arc::new(pages),
+            Arc::new(chunks),
             previews,
             ocr,
+            embeddings,
+            metadata,
             job_concurrency,
         ));
         for document in repository.list_resumable_ingestion().await? {
@@ -74,12 +83,16 @@ impl IngestionQueue {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_dispatcher(
     mut receiver: mpsc::Receiver<u64>,
     repository: Arc<DocumentRepository>,
     pages: Arc<PageRepository>,
+    chunks: Arc<ChunkRepository>,
     previews: PreviewService,
     ocr: OcrClient,
+    embeddings: Option<EmbeddingService>,
+    metadata: MetadataService,
     job_concurrency: usize,
 ) {
     let job_gate = Arc::new(Semaphore::new(job_concurrency));
@@ -97,13 +110,25 @@ async fn run_dispatcher(
         };
         let repository = repository.clone();
         let pages = pages.clone();
+        let chunks = chunks.clone();
         let previews = previews.clone();
         let ocr = ocr.clone();
+        let embeddings = embeddings.clone();
+        let metadata = metadata.clone();
         let active = active.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) =
-                process_document(repository, pages, previews, ocr, document_id).await
+            if let Err(error) = process_document(
+                repository,
+                pages,
+                chunks,
+                previews,
+                ocr,
+                embeddings,
+                metadata,
+                document_id,
+            )
+            .await
             {
                 error!(document_id, error = %error, "ingestion state update failed");
             }
@@ -115,11 +140,15 @@ async fn run_dispatcher(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_document(
     repository: Arc<DocumentRepository>,
     pages: Arc<PageRepository>,
+    chunks: Arc<ChunkRepository>,
     previews: PreviewService,
     ocr: OcrClient,
+    embeddings: Option<EmbeddingService>,
+    metadata: MetadataService,
     document_id: u64,
 ) -> Result<()> {
     let mut document = match repository.get(document_id).await? {
@@ -163,6 +192,7 @@ async fn process_document(
                 repository
                     .set_status(document_id, IngestionStatus::TextReady, None)
                     .await?;
+                document.status = IngestionStatus::TextReady;
             }
             Err(error) => {
                 fail_document(
@@ -171,10 +201,82 @@ async fn process_document(
                     format!("OCR failed: {error:#}"),
                 )
                 .await?;
+                return Ok(());
             }
         }
     }
+
+    if document.status == IngestionStatus::Indexing {
+        repository
+            .set_status(document_id, IngestionStatus::Ready, None)
+            .await?;
+        return Ok(());
+    }
+
+    let Some(embeddings) = embeddings else {
+        return Ok(());
+    };
+
+    if matches!(
+        document.status,
+        IngestionStatus::TextReady | IngestionStatus::Embedding
+    ) {
+        let page_rows = pages.list(document_id).await?;
+        if document.status == IngestionStatus::TextReady {
+            match ocr.infer_metadata(page_rows.clone()).await {
+                Ok(inferred) => match metadata.apply_inferred(document_id, inferred).await {
+                    Ok(updated) => document = updated,
+                    Err(error) => warn!(document_id, error = %error, "metadata storage failed"),
+                },
+                Err(error) => warn!(document_id, error = %error, "metadata inference failed"),
+            }
+        }
+        repository
+            .set_status(document_id, IngestionStatus::Embedding, None)
+            .await?;
+        let mut embedded = match embed_document(&embeddings, &document, &page_rows).await {
+            Ok(chunks) => chunks,
+            Err(error) => {
+                fail_document(
+                    repository.clone(),
+                    document_id,
+                    format!("embedding failed: {error:#}"),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        embedded.sort_by_key(|chunk| chunk.chunk_id);
+        chunks.replace_document(document_id, embedded).await?;
+        repository
+            .set_status(document_id, IngestionStatus::Indexing, None)
+            .await?;
+        document.status = IngestionStatus::Indexing;
+    }
+
     Ok(())
+}
+
+async fn embed_document(
+    embeddings: &EmbeddingService,
+    document: &Document,
+    pages: &[DocumentPage],
+) -> Result<Vec<paperless_models::Chunk>> {
+    let mut chunks = chunk_document(document, pages)?;
+    let vectors = embeddings
+        .embed_documents(chunks.iter().map(|chunk| chunk.text.clone()).collect())
+        .await?;
+    if vectors.len() != chunks.len() {
+        bail!(
+            "Harrier returned {} embeddings for {} chunks",
+            vectors.len(),
+            chunks.len()
+        );
+    }
+    for (chunk, vector) in chunks.iter_mut().zip(vectors) {
+        chunk.embedding = vector;
+    }
+    Ok(chunks)
 }
 
 async fn recognize_document(

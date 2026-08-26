@@ -2,7 +2,9 @@ use std::{env, future::Future, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use futures::{StreamExt, TryStreamExt, stream};
+use paperless_models::{DocumentPage, InferredMetadata};
 use reqwest::{Client, Request, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -12,6 +14,7 @@ const SURYA_FULL_PAGE_PROMPT: &str = "OCR this image to HTML. Each block is a di
 const SURYA_MAX_TOKENS: u32 = 12_288;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_ATTEMPTS: usize = 3;
+const METADATA_PROMPT: &str = "Infer document metadata from the OCR text. Return only JSON with nullable string fields title, document_type, and created_at. Use YYYY-MM-DD for created_at.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrConfig {
@@ -168,6 +171,54 @@ impl OcrClient {
             .context("build OCR request")
     }
 
+    pub async fn infer_metadata(&self, pages: Vec<DocumentPage>) -> Result<InferredMetadata> {
+        let text = pages
+            .into_iter()
+            .map(|page| format!("Page {}:\\n{}", page.page, page.text))
+            .collect::<Vec<_>>()
+            .join("\\n\\n");
+        let text = truncate(&text, 40_000);
+        let body = ChatRequest {
+            model: self.config.model.clone(),
+            max_tokens: 1_024,
+            temperature: 0.0,
+            top_p: 0.1,
+            messages: vec![ChatMessage {
+                role: "user",
+                content: vec![UserContent::Text {
+                    text: format!("{METADATA_PROMPT}\\n\\n{text}"),
+                }],
+            }],
+        };
+        let api_key = self
+            .api_key
+            .as_deref()
+            .context("OCR API key environment variable is not set")?;
+        let endpoint = Url::parse(&format!(
+            "{}/chat/completions",
+            self.config.base_url.as_str().trim_end_matches('/')
+        ))
+        .context("build metadata chat completions URL")?;
+        let _permit = self.acquire_request_slot().await?;
+        let response = self
+            .http
+            .post(endpoint)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("request inferred metadata")?;
+        let status = response.status();
+        let bytes = response.bytes().await.context("read metadata response")?;
+        if !status.is_success() {
+            bail!(
+                "metadata API returned {status}: {}",
+                truncate(&String::from_utf8_lossy(&bytes), 2_000)
+            );
+        }
+        parse_metadata_response(&bytes)
+    }
+
     async fn recognize_page(self, page: PageImage) -> Result<OcrPage> {
         for attempt in 1..=MAX_ATTEMPTS {
             let permit = self.acquire_request_slot().await?;
@@ -259,6 +310,71 @@ struct ChatResponseMessage {
     content: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RawMetadata {
+    title: Option<String>,
+    document_type: Option<String>,
+    created_at: Option<String>,
+}
+
+fn parse_metadata_response(body: &[u8]) -> Result<InferredMetadata> {
+    let response: ChatResponse =
+        serde_json::from_slice(body).context("parse metadata JSON response")?;
+    let content = response
+        .choices
+        .first()
+        .context("metadata response has no choices")?
+        .message
+        .content
+        .as_deref()
+        .context("metadata response has no content")?
+        .trim();
+    let content = content
+        .strip_prefix("```json")
+        .or_else(|| content.strip_prefix("```"))
+        .unwrap_or(content)
+        .strip_suffix("```")
+        .unwrap_or(content)
+        .trim();
+    let raw: RawMetadata = serde_json::from_str(content).context("parse inferred metadata")?;
+    let title = clean_metadata_value(raw.title, 500, "title")?;
+    let document_type = clean_metadata_value(raw.document_type, 100, "document_type")?;
+    let created_at = raw
+        .created_at
+        .map(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .map(|date| date.with_timezone(&Utc))
+                .or_else(|_| {
+                    NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                        .map(|date| Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0).unwrap()))
+                })
+                .with_context(|| format!("invalid inferred created_at: {value}"))
+        })
+        .transpose()?;
+    Ok(InferredMetadata {
+        title,
+        document_type,
+        created_at,
+    })
+}
+
+fn clean_metadata_value(
+    value: Option<String>,
+    maximum_chars: usize,
+    field: &str,
+) -> Result<Option<String>> {
+    let value = value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if value
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > maximum_chars)
+    {
+        bail!("inferred {field} exceeds {maximum_chars} characters");
+    }
+    Ok(value)
+}
+
 fn parse_page_response(page: u32, body: &[u8]) -> Result<OcrPage> {
     let response: ChatResponse = serde_json::from_slice(body).context("parse OCR JSON response")?;
     let html = response
@@ -296,7 +412,7 @@ mod tests {
     use serde_json::Value;
     use url::Url;
 
-    use super::{OcrClient, OcrConfig, PageImage, parse_page_response};
+    use super::{OcrClient, OcrConfig, PageImage, parse_metadata_response, parse_page_response};
 
     static ENVIRONMENT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -374,5 +490,29 @@ mod tests {
         assert_eq!(page.page, 3);
         assert!(page.text.contains("Title"));
         assert!(page.text.contains("Body text"));
+    }
+    #[test]
+    fn parses_and_validates_structured_metadata() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "```json\n{\"title\":\"  Annual statement  \",\"document_type\":\"statement\",\"created_at\":\"2026-01-31\"}\n```"
+                }
+            }]
+        });
+        let inferred = parse_metadata_response(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert_eq!(inferred.title.as_deref(), Some("Annual statement"));
+        assert_eq!(inferred.document_type.as_deref(), Some("statement"));
+        assert_eq!(
+            inferred.created_at.unwrap().to_rfc3339(),
+            "2026-01-31T00:00:00+00:00"
+        );
+
+        let invalid = serde_json::json!({
+            "choices": [{"message": {
+                "content": "{\"title\":null,\"document_type\":null,\"created_at\":\"31/01/2026\"}"
+            }}]
+        });
+        assert!(parse_metadata_response(&serde_json::to_vec(&invalid).unwrap()).is_err());
     }
 }

@@ -12,9 +12,11 @@ chrono.workspace = true
 clap.workspace = true
 futures.workspace = true
 infer.workspace = true
+paperless-embeddings = { path = "../embeddings" }
 paperless-ingest = { path = "../ingest" }
 paperless-models = { path = "../models" }
 paperless-ocr-client = { path = "../ocr-client" }
+paperless-search = { path = "../search" }
 paperless-storage = { path = "../storage" }
 serde.workspace = true
 serde_json.workspace = true

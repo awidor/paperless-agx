@@ -2619,6 +2619,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4475,6 +4481,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokenizers",
+ "tokio",
 ]
 
 [[package]]
@@ -4484,8 +4491,10 @@ dependencies = [
  "anyhow",
  "chrono",
  "image",
+ "paperless-embeddings",
  "paperless-models",
  "paperless-ocr-client",
+ "paperless-search",
  "paperless-storage",
  "tempfile",
  "tokio",
@@ -4507,8 +4516,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "futures",
  "html2md",
+ "paperless-models",
  "parking_lot",
  "reqwest",
  "serde",
@@ -4524,10 +4535,12 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
+ "chrono",
  "futures",
  "lance-index",
  "lancedb",
  "paperless-embeddings",
+ "paperless-models",
  "serde",
  "tempfile",
  "tokio",
@@ -4545,9 +4558,11 @@ dependencies = [
  "http-body-util",
  "image",
  "infer",
+ "paperless-embeddings",
  "paperless-ingest",
  "paperless-models",
  "paperless-ocr-client",
+ "paperless-search",
  "paperless-storage",
  "serde",
  "serde_json",
@@ -6364,6 +6379,11 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "http-range-header",
+ "httpdate",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
  "pin-project-lite",
  "tokio",
  "tokio-util",

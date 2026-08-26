@@ -175,12 +175,126 @@ pub struct PageInfo {
     pub text: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Chunk {
+    pub chunk_id: u64,
+    pub document_id: u64,
+    pub page_start: u32,
+    pub page_end: u32,
+    pub char_start: u32,
+    pub char_end: u32,
+    pub text: String,
+    pub embedding: Vec<f32>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub document_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentSort {
+    #[default]
+    DocumentDateDesc,
+    DocumentDateAsc,
+    AddedDateDesc,
+    AddedDateAsc,
+    TitleAsc,
+    TitleDesc,
+    FileSizeAsc,
+    FileSizeDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DocumentQuery {
+    pub page: u32,
+    pub page_size: u32,
+    pub document_type: Option<String>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_to: Option<DateTime<Utc>>,
+    pub sort: DocumentSort,
+}
+
+impl Default for DocumentQuery {
+    fn default() -> Self {
+        Self {
+            page: 1,
+            page_size: 24,
+            document_type: None,
+            created_from: None,
+            created_to: None,
+            sort: DocumentSort::DocumentDateDesc,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentPageResult {
+    pub items: Vec<Document>,
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DocumentPatch {
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub title: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub document_type: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub created_at: Option<Option<DateTime<Utc>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchRequest {
+    pub query: String,
+    pub page: u32,
+    pub page_size: u32,
+    pub document_type: Option<String>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_to: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub document: Document,
+    pub best_chunk_id: u64,
+    pub page: u32,
+    pub snippet: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchResponse {
+    pub items: Vec<SearchHit>,
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InferredMetadata {
+    pub title: Option<String>,
+    pub document_type: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: &'static str,
     pub ocr_configured: bool,
     pub ocr_base_url: String,
     pub ocr_model: String,
+    pub embedding_configured: bool,
+    pub embedding_model: &'static str,
 }
 
 #[cfg(test)]

@@ -1,3 +1,7 @@
+mod repository;
+
+pub use repository::{ChunkMatch, ChunkRepository, chunk_schema};
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,

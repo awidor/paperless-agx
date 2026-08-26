@@ -4,6 +4,7 @@ use chrono::Utc;
 use paperless_ingest::{IngestionQueue, PreviewService};
 use paperless_models::{Document, IngestionStatus, MediaType};
 use paperless_ocr_client::{OcrClient, OcrConfig};
+use paperless_search::ChunkRepository;
 use paperless_storage::{DataLayout, DocumentRepository, ObjectStore, PageRepository};
 
 #[tokio::test]
@@ -12,6 +13,7 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
     let layout = DataLayout::create(temporary.path()).await.unwrap();
     let repository = DocumentRepository::open(&layout).await.unwrap();
     let pages = PageRepository::open(&layout).await.unwrap();
+    let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
     let object = ObjectStore::new(layout.clone())
         .store(b"not an image".as_slice())
         .await
@@ -47,7 +49,7 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
         pages_per_request: 1,
     })
     .unwrap();
-    let queue = IngestionQueue::start(repository.clone(), pages, previews, ocr, 1, 1)
+    let queue = IngestionQueue::start(repository.clone(), pages, chunks, previews, ocr, None, 1, 1)
         .await
         .unwrap();
 

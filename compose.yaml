@@ -1,0 +1,13 @@
+services:
+  paperless-agx:
+    build: .
+    image: paperless-agx:local
+    restart: unless-stopped
+    environment:
+      OCR_API_KEY: ${OCR_API_KEY:-EMPTY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./data:/data
