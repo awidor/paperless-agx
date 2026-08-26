@@ -1,0 +1,7 @@
+/target
+/data
+/.env
+*.local.toml
+.DS_Store
+__pycache__/
+*.pyc

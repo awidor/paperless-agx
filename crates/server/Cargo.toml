@@ -1,0 +1,34 @@
+[package]
+name = "paperless-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+futures.workspace = true
+infer.workspace = true
+paperless-ingest = { path = "../ingest" }
+paperless-models = { path = "../models" }
+paperless-ocr-client = { path = "../ocr-client" }
+paperless-storage = { path = "../storage" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1.3"
+image.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+url.workspace = true

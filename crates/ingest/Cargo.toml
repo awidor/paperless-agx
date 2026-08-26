@@ -1,0 +1,19 @@
+[package]
+name = "paperless-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+paperless-models = { path = "../models" }
+paperless-ocr-client = { path = "../ocr-client" }
+paperless-storage = { path = "../storage" }
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true

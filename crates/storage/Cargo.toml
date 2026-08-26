@@ -1,0 +1,19 @@
+[package]
+name = "paperless-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+futures.workspace = true
+lancedb.workspace = true
+paperless-models = { path = "../models" }
+tempfile.workspace = true
+tokio.workspace = true
+
