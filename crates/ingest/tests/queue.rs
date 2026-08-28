@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use paperless_ingest::{IngestionQueue, PreviewService};
-use paperless_models::{Document, IngestionStatus, MediaType};
-use paperless_ocr_client::{OcrClient, OcrConfig};
+use paperless_models::{Document, DocumentPage, IngestionStatus, MediaType};
+use paperless_ocr_client::{LlmConfig, OcrClient, OcrConfig};
 use paperless_search::ChunkRepository;
 use paperless_storage::{DataLayout, DocumentRepository, ObjectStore, PageRepository};
 
@@ -41,13 +41,21 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
     };
     repository.insert(&document).await.unwrap();
     let previews = PreviewService::new(layout, 1, 1, 1).unwrap();
-    let ocr = OcrClient::from_environment(OcrConfig {
-        base_url: url::Url::parse("http://127.0.0.1:1/v1").unwrap(),
-        model: "datalab-to/surya-ocr-2".into(),
-        api_key_env: "PATH".into(),
-        max_concurrency: 1,
-        pages_per_request: 1,
-    })
+    let ocr = OcrClient::from_environment(
+        OcrConfig {
+            base_url: url::Url::parse("http://127.0.0.1:1/v1").unwrap(),
+            model: "datalab-to/surya-ocr-2".into(),
+            api_key_env: "PATH".into(),
+            max_concurrency: 1,
+            pages_per_request: 1,
+        },
+        LlmConfig {
+            base_url: url::Url::parse("https://openrouter.ai/api/v1").unwrap(),
+            model: "z-ai/glm-5.3-flash".into(),
+            api_key_env: "PATH".into(),
+            max_concurrency: 1,
+        },
+    )
     .unwrap();
     let queue = IngestionQueue::start(repository.clone(), pages, chunks, previews, ocr, None, 1, 1)
         .await
@@ -58,6 +66,204 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
     queue.retry(document.document_id).await.unwrap();
     let retried = wait_for_status(&repository, document.document_id, IngestionStatus::Failed).await;
     assert_eq!(retried.retry_count, 1);
+}
+
+#[tokio::test]
+async fn missing_embeddings_fails_after_metadata_inference() {
+    let temporary = tempfile::tempdir().unwrap();
+    let layout = DataLayout::create(temporary.path()).await.unwrap();
+    let repository = DocumentRepository::open(&layout).await.unwrap();
+    let pages = PageRepository::open(&layout).await.unwrap();
+    let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
+    let object = ObjectStore::new(layout.clone())
+        .store(b"stored document".as_slice())
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let document = Document {
+        document_id: repository.allocate_id(),
+        content_hash: object.content_hash,
+        media_type: MediaType::Image,
+        filename: "statement.png".into(),
+        title: None,
+        document_type: None,
+        created_at: None,
+        added_at: now,
+        updated_at: now,
+        title_source: None,
+        type_source: None,
+        created_at_source: None,
+        page_count: 1,
+        file_size: object.file_size,
+        status: IngestionStatus::TextReady,
+        last_error: None,
+        retry_count: 0,
+        deleted_at: None,
+    };
+    repository.insert(&document).await.unwrap();
+    pages
+        .replace_document_pages(
+            document.document_id,
+            vec![DocumentPage {
+                document_id: document.document_id,
+                page: 1,
+                text: "Account statement dated 2026-08-01".into(),
+                blocks: vec![],
+                updated_at: now,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url =
+        url::Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/v1/chat/completions",
+                axum::routing::post(|| async {
+                    r#"{"choices":[{"message":{"content":"{\"title\":\"August statement\",\"document_type\":\"statement\",\"created_at\":\"2026-08-01\"}"}}]}"#
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let key_name = "PAPERLESS_QUEUE_METADATA_TEST_KEY";
+    unsafe { std::env::set_var(key_name, "secret") };
+    let ocr = OcrClient::from_environment(
+        OcrConfig {
+            base_url: base_url.clone(),
+            model: "instruct".into(),
+            api_key_env: key_name.into(),
+            max_concurrency: 1,
+            pages_per_request: 1,
+        },
+        LlmConfig {
+            base_url,
+            model: "z-ai/glm-5.3-flash".into(),
+            api_key_env: key_name.into(),
+            max_concurrency: 1,
+        },
+    )
+    .unwrap();
+    let previews = PreviewService::new(layout, 1, 1, 1).unwrap();
+    let _queue =
+        IngestionQueue::start(repository.clone(), pages, chunks, previews, ocr, None, 1, 1)
+            .await
+            .unwrap();
+
+    let failed = wait_for_status(&repository, document.document_id, IngestionStatus::Failed).await;
+    unsafe { std::env::remove_var(key_name) };
+    assert_eq!(failed.title.as_deref(), Some("August statement"));
+    assert_eq!(failed.document_type.as_deref(), Some("statement"));
+    assert_eq!(
+        failed.created_at.unwrap().to_rfc3339(),
+        "2026-08-01T00:00:00+00:00"
+    );
+    assert!(
+        failed
+            .last_error
+            .unwrap()
+            .contains("embedding model is not configured")
+    );
+}
+
+#[tokio::test]
+async fn metadata_error_fails_the_document() {
+    let temporary = tempfile::tempdir().unwrap();
+    let layout = DataLayout::create(temporary.path()).await.unwrap();
+    let repository = DocumentRepository::open(&layout).await.unwrap();
+    let pages = PageRepository::open(&layout).await.unwrap();
+    let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
+    let object = ObjectStore::new(layout.clone())
+        .store(b"stored document".as_slice())
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let document = Document {
+        document_id: repository.allocate_id(),
+        content_hash: object.content_hash,
+        media_type: MediaType::Image,
+        filename: "statement.png".into(),
+        title: None,
+        document_type: None,
+        created_at: None,
+        added_at: now,
+        updated_at: now,
+        title_source: None,
+        type_source: None,
+        created_at_source: None,
+        page_count: 1,
+        file_size: object.file_size,
+        status: IngestionStatus::TextReady,
+        last_error: None,
+        retry_count: 0,
+        deleted_at: None,
+    };
+    repository.insert(&document).await.unwrap();
+    pages
+        .replace_document_pages(
+            document.document_id,
+            vec![DocumentPage {
+                document_id: document.document_id,
+                page: 1,
+                text: "Account statement dated 2026-08-01".into(),
+                blocks: vec![],
+                updated_at: now,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url =
+        url::Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/v1/chat/completions",
+                axum::routing::post(|| async {
+                    (axum::http::StatusCode::TOO_MANY_REQUESTS, "busy")
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let key_name = "PAPERLESS_QUEUE_METADATA_ERROR_TEST_KEY";
+    unsafe { std::env::set_var(key_name, "secret") };
+    let ocr = OcrClient::from_environment(
+        OcrConfig {
+            base_url: base_url.clone(),
+            model: "instruct".into(),
+            api_key_env: key_name.into(),
+            max_concurrency: 1,
+            pages_per_request: 1,
+        },
+        LlmConfig {
+            base_url,
+            model: "z-ai/glm-5.3-flash".into(),
+            api_key_env: key_name.into(),
+            max_concurrency: 1,
+        },
+    )
+    .unwrap();
+    let previews = PreviewService::new(layout, 1, 1, 1).unwrap();
+    let _queue =
+        IngestionQueue::start(repository.clone(), pages, chunks, previews, ocr, None, 1, 1)
+            .await
+            .unwrap();
+
+    let failed = wait_for_status(&repository, document.document_id, IngestionStatus::Failed).await;
+    unsafe { std::env::remove_var(key_name) };
+    let error = failed.last_error.unwrap();
+    assert!(error.contains("metadata inference failed"));
+    assert!(error.contains("429"));
+    assert!(failed.title.is_none());
 }
 
 async fn wait_for_status(

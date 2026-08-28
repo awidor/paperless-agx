@@ -7,7 +7,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 use html5ever::{parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use paperless_models::{DocumentPage, InferredMetadata, OcrBlock};
-use reqwest::{Client, Request, StatusCode};
+use reqwest::{Client, Request};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
@@ -15,8 +15,7 @@ use url::Url;
 const SURYA_FULL_PAGE_PROMPT: &str = "OCR this image to HTML. Each block is a div with data-label and data-bbox (x0 y0 x1 y1, normalized 0-1000).";
 const SURYA_MAX_TOKENS: u32 = 12_288;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
-const MAX_ATTEMPTS: usize = 3;
-const METADATA_PROMPT: &str = "Infer document metadata from the OCR text. Return only JSON with nullable string fields title, document_type, and created_at. Use YYYY-MM-DD for created_at.";
+const METADATA_PROMPT: &str = "Extract metadata from the OCR text.\nReturn only a JSON object with nullable string fields title, document_type, and created_at.\nUse a concise, human-readable title in the document's language. Do not copy the first line as the title.\nSet created_at to the date stated in the document, such as the letter date or invoice date. Never use a scan date or print timestamp.\nChoose document_type only from: invoice, receipt, contract, letter, statement, certificate, other. Prefer null when unsure; do not guess.\nUse YYYY-MM-DD for created_at.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrConfig {
@@ -45,6 +44,37 @@ impl OcrConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    pub base_url: Url,
+    pub model: String,
+    pub api_key_env: String,
+    pub max_concurrency: usize,
+}
+
+impl LlmConfig {
+    pub fn check(&self) -> Result<()> {
+        if self.model.trim().is_empty() {
+            bail!("llm.model must not be empty");
+        }
+        if self.api_key_env.trim().is_empty() {
+            bail!("llm.api_key_env must not be empty");
+        }
+        if self.max_concurrency == 0 {
+            bail!("llm.max_concurrency must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct MetadataEndpoint {
+    base_url: Url,
+    model: String,
+    api_key: String,
+    request_gate: Arc<Semaphore>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PageImage {
     pub page: u32,
@@ -63,34 +93,44 @@ pub struct OcrPage {
 pub struct OcrClient {
     http: Client,
     config: OcrConfig,
-    api_key: Option<String>,
+    api_key: String,
     request_gate: Arc<Semaphore>,
+    metadata: MetadataEndpoint,
 }
 
 impl OcrClient {
-    pub fn from_environment(config: OcrConfig) -> Result<Self> {
+    pub fn from_environment(config: OcrConfig, llm: LlmConfig) -> Result<Self> {
         config.check()?;
-        let api_key = env::var(&config.api_key_env)
-            .ok()
-            .filter(|value| !value.is_empty());
+        llm.check()?;
+        let api_key = environment_key(&config.api_key_env)
+            .with_context(|| format!("OCR API key {} is not set", config.api_key_env))?;
+        let request_gate = Arc::new(Semaphore::new(config.max_concurrency));
+        let metadata = MetadataEndpoint {
+            api_key: environment_key(&llm.api_key_env)
+                .with_context(|| format!("metadata API key {} is not set", llm.api_key_env))?,
+            request_gate: Arc::new(Semaphore::new(llm.max_concurrency)),
+            base_url: llm.base_url,
+            model: llm.model,
+        };
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
             .context("build OCR HTTP client")?;
         Ok(Self {
             http,
-            request_gate: Arc::new(Semaphore::new(config.max_concurrency)),
             config,
             api_key,
+            request_gate,
+            metadata,
         })
-    }
-
-    pub fn configured(&self) -> bool {
-        self.api_key.is_some()
     }
 
     pub fn config(&self) -> &OcrConfig {
         &self.config
+    }
+
+    pub fn metadata_model(&self) -> &str {
+        &self.metadata.model
     }
 
     pub async fn acquire_request_slot(&self) -> Result<OwnedSemaphorePermit> {
@@ -130,10 +170,7 @@ impl OcrClient {
     }
 
     pub fn prepare_page_request(&self, page: &PageImage) -> Result<Request> {
-        let api_key = self
-            .api_key
-            .as_deref()
-            .context("OCR API key environment variable is not set")?;
+        let api_key = &self.api_key;
         if page.page == 0 {
             bail!("OCR page number must start at one");
         }
@@ -160,12 +197,10 @@ impl OcrClient {
                     },
                 ],
             }],
+            response_format: None,
+            reasoning: None,
         };
-        let endpoint = Url::parse(&format!(
-            "{}/chat/completions",
-            self.config.base_url.as_str().trim_end_matches('/')
-        ))
-        .context("build OCR chat completions URL")?;
+        let endpoint = chat_completions_url(&self.config.base_url, "OCR")?;
         self.http
             .post(endpoint)
             .bearer_auth(api_key)
@@ -175,99 +210,77 @@ impl OcrClient {
     }
 
     pub async fn infer_metadata(&self, pages: Vec<DocumentPage>) -> Result<InferredMetadata> {
-        let text = pages
-            .into_iter()
-            .map(|page| format!("Page {}:\\n{}", page.page, page.text))
-            .collect::<Vec<_>>()
-            .join("\\n\\n");
-        let text = truncate(&text, 40_000);
+        let request = self.prepare_metadata_request(&pages)?;
+        let bytes = self
+            .execute(request, self.metadata.request_gate.clone(), "metadata")
+            .await
+            .context("request inferred metadata")?;
+        parse_metadata_response(&bytes)
+    }
+
+    fn prepare_metadata_request(&self, pages: &[DocumentPage]) -> Result<Request> {
+        let api_key = &self.metadata.api_key;
         let body = ChatRequest {
-            model: self.config.model.clone(),
+            model: self.metadata.model.clone(),
             max_tokens: 1_024,
             temperature: 0.0,
             top_p: 0.1,
             messages: vec![ChatMessage {
                 role: "user",
                 content: vec![UserContent::Text {
-                    text: format!("{METADATA_PROMPT}\\n\\n{text}"),
+                    text: format!("{METADATA_PROMPT}\n\n{}", metadata_text(pages)),
                 }],
             }],
+            response_format: Some(ResponseFormat {
+                kind: "json_object",
+            }),
+            reasoning: Some(Reasoning { effort: "high" }),
         };
-        let api_key = self
-            .api_key
-            .as_deref()
-            .context("OCR API key environment variable is not set")?;
-        let endpoint = Url::parse(&format!(
-            "{}/chat/completions",
-            self.config.base_url.as_str().trim_end_matches('/')
-        ))
-        .context("build metadata chat completions URL")?;
-        let _permit = self.acquire_request_slot().await?;
-        let response = self
-            .http
+        let endpoint = chat_completions_url(&self.metadata.base_url, "metadata")?;
+        self.http
             .post(endpoint)
             .bearer_auth(api_key)
             .json(&body)
-            .send()
-            .await
-            .context("request inferred metadata")?;
-        let status = response.status();
-        let bytes = response.bytes().await.context("read metadata response")?;
-        if !status.is_success() {
-            bail!(
-                "metadata API returned {status}: {}",
-                truncate(&String::from_utf8_lossy(&bytes), 2_000)
-            );
-        }
-        parse_metadata_response(&bytes)
+            .build()
+            .context("build metadata request")
     }
 
     async fn recognize_page(self, page: PageImage) -> Result<OcrPage> {
-        for attempt in 1..=MAX_ATTEMPTS {
-            let permit = self.acquire_request_slot().await?;
-            let request = self.prepare_page_request(&page)?;
-            let response = self.http.execute(request).await;
-            let result = match response {
-                Ok(response) if response.status().is_success() => {
-                    let bytes = response.bytes().await.context("read OCR response body")?;
-                    parse_page_response(page.page, &bytes)
-                }
-                Ok(response) => {
-                    let status = response.status();
-                    let retryable = is_retryable_status(status);
-                    let body = response.text().await.unwrap_or_default();
-                    Err(anyhow::anyhow!(
-                        "OCR API returned {status}: {}",
-                        truncate(&body, 2_000)
-                    ))
-                    .with_context(|| {
-                        if retryable {
-                            "transient OCR response"
-                        } else {
-                            "OCR response"
-                        }
-                    })
-                }
-                Err(error) => {
-                    let retryable = error.is_connect() || error.is_timeout();
-                    Err(error).context(if retryable {
-                        "transient OCR request"
-                    } else {
-                        "OCR request"
-                    })
-                }
-            };
-            drop(permit);
+        let request = self.prepare_page_request(&page)?;
+        let bytes = self
+            .execute(request, self.request_gate.clone(), "OCR")
+            .await
+            .with_context(|| format!("OCR page {}", page.page))?;
+        parse_page_response(page.page, &bytes)
+    }
 
-            match result {
-                Ok(page) => return Ok(page),
-                Err(error) if attempt < MAX_ATTEMPTS && is_transient(&error) => {
-                    tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
-                }
-                Err(error) => return Err(error).with_context(|| format!("OCR page {}", page.page)),
-            }
+    async fn execute(
+        &self,
+        request: Request,
+        request_gate: Arc<Semaphore>,
+        operation: &'static str,
+    ) -> Result<Vec<u8>> {
+        let _permit = request_gate
+            .acquire_owned()
+            .await
+            .with_context(|| format!("{operation} request gate closed"))?;
+        let response = self
+            .http
+            .execute(request)
+            .await
+            .with_context(|| format!("{operation} request"))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .with_context(|| format!("read {operation} response body"))?;
+        if !status.is_success() {
+            bail!(
+                "{operation} API returned {status}: {}",
+                truncate(&String::from_utf8_lossy(&body), 2_000)
+            );
         }
-        unreachable!("OCR attempt loop always returns")
+        Ok(body.to_vec())
     }
 }
 
@@ -278,6 +291,21 @@ struct ChatRequest {
     temperature: f32,
     top_p: f32,
     messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<Reasoning>,
+}
+
+#[derive(Debug, Serialize)]
+struct Reasoning {
+    effort: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -474,15 +502,44 @@ fn parse_normalized_bbox(value: &str) -> Result<[u16; 4]> {
     ])
 }
 
-fn is_retryable_status(status: StatusCode) -> bool {
-    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+fn environment_key(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-fn is_transient(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        let message = cause.to_string();
-        message == "transient OCR response" || message == "transient OCR request"
-    })
+fn chat_completions_url(base_url: &Url, operation: &str) -> Result<Url> {
+    Url::parse(&format!(
+        "{}/chat/completions",
+        base_url.as_str().trim_end_matches('/')
+    ))
+    .with_context(|| format!("build {operation} chat completions URL"))
+}
+
+fn metadata_text(pages: &[DocumentPage]) -> String {
+    let mut pages = pages.iter().collect::<Vec<_>>();
+    pages.sort_by_key(|page| page.page);
+    let mut output = String::with_capacity(40_000);
+    let mut used = 0;
+    for page in pages {
+        if used == 40_000 {
+            break;
+        }
+        if used > 0 {
+            used += append_chars(&mut output, "\n\n", 40_000 - used);
+        }
+        let header = format!("Page {}:\n", page.page);
+        used += append_chars(&mut output, &header, 40_000 - used);
+        used += append_chars(&mut output, &page.text, 40_000 - used);
+    }
+    output
+}
+
+fn append_chars(output: &mut String, value: &str, maximum_chars: usize) -> usize {
+    let mut count = 0;
+    for character in value.chars().take(maximum_chars) {
+        output.push(character);
+        count += 1;
+    }
+    count
 }
 
 fn truncate(value: &str, maximum_chars: usize) -> String {
@@ -491,31 +548,48 @@ fn truncate(value: &str, maximum_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::LazyLock;
+    use std::sync::{
+        Arc, LazyLock,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-    use parking_lot::Mutex;
+    use axum::{Json, Router, http::StatusCode, routing::post};
+    use chrono::Utc;
+    use paperless_models::DocumentPage;
     use serde_json::Value;
+    use tokio::sync::Mutex;
     use url::Url;
 
-    use super::{OcrClient, OcrConfig, PageImage, parse_metadata_response, parse_page_response};
+    use super::{
+        LlmConfig, METADATA_PROMPT, OcrClient, OcrConfig, PageImage, metadata_text,
+        parse_metadata_response, parse_page_response,
+    };
 
     static ENVIRONMENT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn client(key_name: &str, pages_per_request: usize) -> OcrClient {
         unsafe { std::env::set_var(key_name, "secret") };
-        OcrClient::from_environment(OcrConfig {
-            base_url: Url::parse("http://localhost:8000/v1").unwrap(),
-            model: "datalab-to/surya-ocr-2".into(),
-            api_key_env: key_name.into(),
-            max_concurrency: 2,
-            pages_per_request,
-        })
+        OcrClient::from_environment(
+            OcrConfig {
+                base_url: Url::parse("http://localhost:8000/v1").unwrap(),
+                model: "datalab-to/surya-ocr-2".into(),
+                api_key_env: key_name.into(),
+                max_concurrency: 2,
+                pages_per_request,
+            },
+            LlmConfig {
+                base_url: Url::parse("https://openrouter.ai/api/v1").unwrap(),
+                model: "z-ai/glm-5.3-flash".into(),
+                api_key_env: key_name.into(),
+                max_concurrency: 1,
+            },
+        )
         .unwrap()
     }
 
-    #[test]
-    fn prepares_surya_openai_request() {
-        let _guard = ENVIRONMENT_LOCK.lock();
+    #[tokio::test]
+    async fn prepares_surya_openai_request() {
+        let _guard = ENVIRONMENT_LOCK.lock().await;
         let client = client("PAPERLESS_TEST_OCR_KEY", 2);
         let request = client
             .prepare_page_request(&PageImage {
@@ -547,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_oversized_page_batches() {
-        let _guard = ENVIRONMENT_LOCK.lock();
+        let _guard = ENVIRONMENT_LOCK.lock().await;
         let client = client("PAPERLESS_TEST_OCR_LIMIT_KEY", 1);
         let pages = vec![
             PageImage {
@@ -563,6 +637,150 @@ mod tests {
         ];
         assert!(client.recognize_pages(pages).await.is_err());
         unsafe { std::env::remove_var("PAPERLESS_TEST_OCR_LIMIT_KEY") };
+    }
+
+    #[test]
+    fn metadata_prompt_defines_extraction_rules() {
+        assert!(METADATA_PROMPT.contains("document's language"));
+        assert!(METADATA_PROMPT.contains("Do not copy the first line"));
+        assert!(METADATA_PROMPT.contains("Never use a scan date or print timestamp"));
+        assert!(
+            METADATA_PROMPT
+                .contains("invoice, receipt, contract, letter, statement, certificate, other")
+        );
+        assert!(METADATA_PROMPT.contains("Prefer null when unsure"));
+    }
+
+    #[tokio::test]
+    async fn dedicated_llm_request_uses_json_mode_and_metadata_model() {
+        let _guard = ENVIRONMENT_LOCK.lock().await;
+        let ocr_key = "PAPERLESS_TEST_DEDICATED_OCR_KEY";
+        let llm_key = "PAPERLESS_TEST_DEDICATED_LLM_KEY";
+        unsafe {
+            std::env::set_var(ocr_key, "ocr-secret");
+            std::env::set_var(llm_key, "llm-secret");
+        }
+        let client = OcrClient::from_environment(
+            OcrConfig {
+                base_url: Url::parse("http://localhost:8000/v1").unwrap(),
+                model: "vision".into(),
+                api_key_env: ocr_key.into(),
+                max_concurrency: 2,
+                pages_per_request: 2,
+            },
+            LlmConfig {
+                base_url: Url::parse("https://openrouter.ai/api/v1").unwrap(),
+                model: "z-ai/glm-5.3-flash".into(),
+                api_key_env: llm_key.into(),
+                max_concurrency: 1,
+            },
+        )
+        .unwrap();
+        let request = client
+            .prepare_metadata_request(&[document_page(1, "Invoice dated 2026-08-01")])
+            .unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        assert_eq!(request.headers()["authorization"], "Bearer llm-secret");
+        let body: Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body["model"], "z-ai/glm-5.3-flash");
+        assert_eq!(body["response_format"]["type"], "json_object");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert!(
+            body["messages"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with(METADATA_PROMPT)
+        );
+        unsafe {
+            std::env::remove_var(ocr_key);
+            std::env::remove_var(llm_key);
+        }
+    }
+
+    #[test]
+    fn metadata_text_prefers_earliest_pages_at_the_limit() {
+        let text = metadata_text(&[
+            document_page(2, "later page"),
+            document_page(1, &"first page ".repeat(5_000)),
+        ]);
+
+        assert_eq!(text.chars().count(), 40_000);
+        assert!(text.starts_with("Page 1:\nfirst page"));
+        assert!(!text.contains("Page 2:"));
+    }
+
+    #[tokio::test]
+    async fn metadata_request_returns_the_first_error() {
+        let _guard = ENVIRONMENT_LOCK.lock().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let route_attempts = attempts.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let route_attempts = route_attempts.clone();
+                async move {
+                    route_attempts.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(serde_json::json!({"error": "busy"})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url =
+            Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let ocr_key = "PAPERLESS_TEST_ERROR_OCR_KEY";
+        let llm_key = "PAPERLESS_TEST_ERROR_LLM_KEY";
+        unsafe {
+            std::env::set_var(ocr_key, "ocr-secret");
+            std::env::set_var(llm_key, "llm-secret");
+        }
+        let client = OcrClient::from_environment(
+            OcrConfig {
+                base_url: Url::parse("http://localhost:8000/v1").unwrap(),
+                model: "vision".into(),
+                api_key_env: ocr_key.into(),
+                max_concurrency: 1,
+                pages_per_request: 1,
+            },
+            LlmConfig {
+                base_url,
+                model: "z-ai/glm-5.3-flash".into(),
+                api_key_env: llm_key.into(),
+                max_concurrency: 1,
+            },
+        )
+        .unwrap();
+
+        let error = client
+            .infer_metadata(vec![document_page(1, "Invoice dated 2026-08-01")])
+            .await
+            .unwrap_err();
+        unsafe {
+            std::env::remove_var(ocr_key);
+            std::env::remove_var(llm_key);
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(format!("{error:#}").contains("429"));
+    }
+
+    fn document_page(page: u32, text: &str) -> DocumentPage {
+        DocumentPage {
+            document_id: 1,
+            page,
+            text: text.into(),
+            blocks: vec![],
+            updated_at: Utc::now(),
+        }
     }
 
     #[test]

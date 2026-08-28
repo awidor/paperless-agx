@@ -302,6 +302,7 @@ pub struct HealthResponse {
     pub ocr_configured: bool,
     pub ocr_base_url: String,
     pub ocr_model: String,
+    pub metadata_model: String,
     pub embedding_configured: bool,
     pub embedding_model: &'static str,
 }

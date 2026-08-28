@@ -21,4 +21,4 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-parking_lot.workspace = true
+axum.workspace = true

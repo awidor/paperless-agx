@@ -85,6 +85,7 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
     }
   }
 
+
   async function remove() {
     if (!window.confirm("Delete this document and its indexed data? This action cannot be undone.")) return;
     setBusy(true);
@@ -121,9 +122,9 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
           <section className="metadata-column">
             <form onSubmit={save}>
               <h3>Document information</h3>
-              <label>Title<input value={title} maxLength={500} placeholder={document.filename} onChange={(event) => setTitle(event.target.value)} /></label>
-              <label>Document type<input value={documentType} maxLength={100} list="document-types" placeholder="Unclassified" onChange={(event) => setDocumentType(event.target.value)} /><datalist id="document-types">{types.map((type) => <option key={type} value={type} />)}</datalist></label>
-              <label>Document date<input type="date" value={createdAt} onChange={(event) => setCreatedAt(event.target.value)} /></label>
+              <label><span className="metadata-label">Title{document.title_source === "ai" && <span className="ai-badge">AI</span>}</span><input value={title} maxLength={500} placeholder={document.filename} onChange={(event) => setTitle(event.target.value)} /></label>
+              <label><span className="metadata-label">Document type{document.type_source === "ai" && <span className="ai-badge">AI</span>}</span><input value={documentType} maxLength={100} list="document-types" placeholder="Unclassified" onChange={(event) => setDocumentType(event.target.value)} /><datalist id="document-types">{types.map((type) => <option key={type} value={type} />)}</datalist></label>
+              <label><span className="metadata-label">Document date{document.created_at_source === "ai" && <span className="ai-badge">AI</span>}</span><input type="date" value={createdAt} onChange={(event) => setCreatedAt(event.target.value)} /></label>
               <button className="primary-button" disabled={busy || !dirty}><Save size={17} /> {busy ? "Saving" : dirty ? "Save changes" : "Saved"}</button>
             </form>
             <div className="document-facts"><h3>Processing</h3><dl><div><dt>Status</dt><dd><span className={`status status-${document.status.toLowerCase()} stamp`}>{document.status.toLowerCase().replaceAll("_", " ")}</span></dd></div><div><dt>Pages</dt><dd className="mono">{document.page_count}</dd></div><div><dt>Added</dt><dd className="mono">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(document.added_at))}</dd></div></dl>{document.last_error && <p className="card-error">{document.last_error}</p>}{document.status === "FAILED" && <button disabled={busy} onClick={() => void retry()}><RefreshCw size={16} /> Try reading again</button>}</div>

@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       OCR_API_KEY: ${OCR_API_KEY:-EMPTY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

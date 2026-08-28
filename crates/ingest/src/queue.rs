@@ -11,7 +11,7 @@ use paperless_ocr_client::OcrClient;
 use paperless_search::ChunkRepository;
 use paperless_storage::{DocumentRepository, PageRepository};
 use tokio::sync::{Semaphore, mpsc};
-use tracing::{error, warn};
+use tracing::error;
 
 use crate::{MetadataService, PreviewService, chunk_document};
 
@@ -151,107 +151,88 @@ async fn process_document(
     metadata: MetadataService,
     document_id: u64,
 ) -> Result<()> {
-    let mut document = match repository.get(document_id).await? {
-        Some(document) if document.deleted_at.is_none() => document,
-        _ => return Ok(()),
-    };
-
-    if matches!(
-        document.status,
-        IngestionStatus::Stored | IngestionStatus::Previewing
-    ) {
-        repository
-            .set_status(document_id, IngestionStatus::Previewing, None)
-            .await?;
-        match previews.prepare_owned(document.clone()).await {
-            Ok(page_count) => {
-                repository
-                    .set_preview_ready(document_id, page_count)
-                    .await?;
-                document.page_count = page_count;
-                document.status = IngestionStatus::Ocr;
-            }
-            Err(error) => {
-                fail_document(
-                    repository.clone(),
-                    document_id,
-                    format!("preview failed: {error:#}"),
-                )
-                .await?;
-                return Ok(());
-            }
-        }
-    }
-
-    if document.status == IngestionStatus::Ocr {
-        match recognize_document(previews.clone(), ocr.clone(), document.clone()).await {
-            Ok(recognized) => {
-                pages
-                    .replace_document_pages(document_id, recognized)
-                    .await?;
-                repository
-                    .set_status(document_id, IngestionStatus::TextReady, None)
-                    .await?;
-                document.status = IngestionStatus::TextReady;
-            }
-            Err(error) => {
-                fail_document(
-                    repository.clone(),
-                    document_id,
-                    format!("OCR failed: {error:#}"),
-                )
-                .await?;
-                return Ok(());
-            }
-        }
-    }
-
-    if matches!(
-        document.status,
-        IngestionStatus::TextReady | IngestionStatus::Embedding
-    ) {
-        let Some(embeddings) = embeddings else {
-            return Ok(());
+    let result: Result<()> = async {
+        let mut document = match repository.get(document_id).await? {
+            Some(document) if document.deleted_at.is_none() => document,
+            _ => return Ok(()),
         };
-        let page_rows = pages.list(document_id).await?;
-        if document.status == IngestionStatus::TextReady {
-            match ocr.infer_metadata(page_rows.clone()).await {
-                Ok(inferred) => match metadata.apply_inferred(document_id, inferred).await {
-                    Ok(updated) => document = updated,
-                    Err(error) => warn!(document_id, error = %error, "metadata storage failed"),
-                },
-                Err(error) => warn!(document_id, error = %error, "metadata inference failed"),
-            }
-        }
-        repository
-            .set_status(document_id, IngestionStatus::Embedding, None)
-            .await?;
-        let mut embedded = match embed_document(&embeddings, &document, &page_rows).await {
-            Ok(chunks) => chunks,
-            Err(error) => {
-                fail_document(
-                    repository.clone(),
-                    document_id,
-                    format!("embedding failed: {error:#}"),
-                )
+
+        if matches!(
+            document.status,
+            IngestionStatus::Stored | IngestionStatus::Previewing
+        ) {
+            repository
+                .set_status(document_id, IngestionStatus::Previewing, None)
                 .await?;
-                return Ok(());
+            let page_count = previews
+                .prepare_owned(document.clone())
+                .await
+                .context("preview failed")?;
+            repository
+                .set_preview_ready(document_id, page_count)
+                .await?;
+            document.page_count = page_count;
+            document.status = IngestionStatus::Ocr;
+        }
+
+        if document.status == IngestionStatus::Ocr {
+            let recognized = recognize_document(previews.clone(), ocr.clone(), document.clone())
+                .await
+                .context("OCR failed")?;
+            pages
+                .replace_document_pages(document_id, recognized)
+                .await?;
+            repository
+                .set_status(document_id, IngestionStatus::TextReady, None)
+                .await?;
+            document.status = IngestionStatus::TextReady;
+        }
+
+        if matches!(
+            document.status,
+            IngestionStatus::TextReady | IngestionStatus::Embedding
+        ) {
+            let page_rows = pages.list(document_id).await?;
+            if document.status == IngestionStatus::TextReady {
+                let inferred = ocr
+                    .infer_metadata(page_rows.clone())
+                    .await
+                    .context("metadata inference failed")?;
+                document = metadata
+                    .apply_inferred(document_id, inferred)
+                    .await
+                    .context("metadata storage failed")?;
             }
-        };
-        embedded.sort_by_key(|chunk| chunk.chunk_id);
-        chunks.replace_document(document_id, embedded).await?;
-        repository
-            .set_status(document_id, IngestionStatus::Indexing, None)
-            .await?;
-        document.status = IngestionStatus::Indexing;
-    }
+            let embeddings = embeddings
+                .as_ref()
+                .context("embedding model is not configured")?;
+            repository
+                .set_status(document_id, IngestionStatus::Embedding, None)
+                .await?;
+            let mut embedded = embed_document(embeddings, &document, &page_rows)
+                .await
+                .context("embedding failed")?;
+            embedded.sort_by_key(|chunk| chunk.chunk_id);
+            chunks.replace_document(document_id, embedded).await?;
+            repository
+                .set_status(document_id, IngestionStatus::Indexing, None)
+                .await?;
+            document.status = IngestionStatus::Indexing;
+        }
 
-    if document.status == IngestionStatus::Indexing {
-        repository
-            .set_status(document_id, IngestionStatus::Ready, None)
-            .await?;
-    }
+        if document.status == IngestionStatus::Indexing {
+            repository
+                .set_status(document_id, IngestionStatus::Ready, None)
+                .await?;
+        }
 
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        fail_document(repository, document_id, format!("{error:#}")).await?;
+    }
     Ok(())
 }
 

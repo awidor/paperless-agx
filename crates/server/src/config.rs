@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use paperless_ocr_client::OcrConfig;
+use paperless_ocr_client::{LlmConfig, OcrConfig};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub eager_thumbnail_pages: u32,
     #[serde(default)]
     pub embeddings: Option<EmbeddingConfig>,
+    pub llm: LlmConfig,
     pub ocr: OcrConfig,
 }
 
@@ -45,6 +46,7 @@ impl AppConfig {
             bail!("render_concurrency must be greater than zero");
         }
         self.ocr.check()?;
+        self.llm.check()?;
         if self
             .embeddings
             .as_ref()
@@ -79,6 +81,12 @@ model = "vision"
 api_key_env = "OCR_API_KEY"
 max_concurrency = 2
 pages_per_request = 4
+
+[llm]
+base_url = "https://openrouter.ai/api/v1"
+model = "z-ai/glm-5.3-flash"
+api_key_env = "OPENROUTER_API_KEY"
+max_concurrency = 1
 "#,
         )
         .await
@@ -86,5 +94,29 @@ pages_per_request = 4
         let config = AppConfig::load(path).await.unwrap();
         assert_eq!(config.listen_addr.to_string(), "0.0.0.0:3000");
         assert_eq!(config.ocr.pages_per_request, 4);
+        assert_eq!(config.llm.model, "z-ai/glm-5.3-flash");
+        assert_eq!(config.llm.max_concurrency, 1);
+    }
+
+    #[test]
+    fn requires_llm_configuration() {
+        let error = toml::from_str::<AppConfig>(
+            r#"
+data_dir = "/data"
+listen_addr = "0.0.0.0:3000"
+queue_capacity = 16
+render_concurrency = 2
+eager_thumbnail_pages = 3
+
+[ocr]
+base_url = "http://host.docker.internal:8000/v1"
+model = "vision"
+api_key_env = "OCR_API_KEY"
+max_concurrency = 2
+pages_per_request = 4
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing field `llm`"));
     }
 }

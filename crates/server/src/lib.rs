@@ -78,7 +78,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         }
         None => None,
     };
-    let ocr = OcrClient::from_environment(config.ocr)?;
+    let ocr = OcrClient::from_environment(config.ocr, config.llm)?;
     let ingestion = IngestionQueue::start(
         documents.clone(),
         pages.clone(),

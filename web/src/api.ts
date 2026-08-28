@@ -72,6 +72,7 @@ export function retryDocument(id: number): Promise<Document> {
   return request(`/api/documents/${id}/retry`, { method: "POST" });
 }
 
+
 export function searchDocuments(payload: SearchRequest): Promise<SearchResponse> {
   return request("/api/search", {
     method: "POST",

@@ -25,9 +25,10 @@ use crate::AppState;
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
-        ocr_configured: state.ocr.configured(),
+        ocr_configured: true,
         ocr_base_url: state.ocr.config().base_url.to_string(),
         ocr_model: state.ocr.config().model.clone(),
+        metadata_model: state.ocr.metadata_model().to_owned(),
         embedding_configured: state.embeddings.is_some(),
         embedding_model: paperless_embeddings::HARRIER_MODEL_ID,
     })

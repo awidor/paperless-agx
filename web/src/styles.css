@@ -232,6 +232,12 @@ main { width: min(1160px, 92vw); margin: 0 auto; padding: 22px 0 72px; }
 .metadata-column label + label { margin-top: 13px; }
 .metadata-column input { font-family: inherit; }
 .metadata-column input::placeholder, .filter-panel input::placeholder { color: var(--graphite); opacity: 0.75; text-overflow: ellipsis; }
+.metadata-label { display: inline-flex; align-items: center; gap: 6px; }
+.ai-badge {
+  padding: 2px 5px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--highlight); color: var(--ink); font: 600 8px/1 var(--mono);
+  letter-spacing: 0.08em;
+}
 .primary-button {
   width: 100%; margin-top: 16px; min-height: 40px;
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;

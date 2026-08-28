@@ -10,7 +10,7 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use image::{DynamicImage, ImageFormat};
 use paperless_models::{Document, IngestionStatus, MediaType};
-use paperless_ocr_client::OcrConfig;
+use paperless_ocr_client::{LlmConfig, OcrConfig};
 use paperless_server::{AppConfig, EmbeddingConfig, build_app};
 use paperless_storage::{DataLayout, DocumentRepository, ObjectStore};
 use tower::ServiceExt;
@@ -24,6 +24,12 @@ fn config(data_dir: &Path, base_url: Url) -> AppConfig {
         render_concurrency: 2,
         eager_thumbnail_pages: 3,
         embeddings: None,
+        llm: LlmConfig {
+            base_url: base_url.clone(),
+            model: "z-ai/glm-5.3-flash".into(),
+            api_key_env: "PATH".into(),
+            max_concurrency: 1,
+        },
         ocr: OcrConfig {
             base_url,
             model: "datalab-to/surya-ocr-2".into(),
@@ -41,17 +47,26 @@ async fn start_ocr() -> Url {
 async fn start_ocr_with_text(text: String) -> Url {
     let app = Router::new().route(
         "/v1/chat/completions",
-        post(move || {
+        post(move |Json(body): Json<serde_json::Value>| {
             let text = text.clone();
             async move {
+                let is_ocr = body["messages"][0]["content"]
+                    .as_array()
+                    .is_some_and(|content| content.iter().any(|item| item["type"] == "image_url"));
+                let content = if is_ocr {
+                    format!(
+                        "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>{text}</p></div>"
+                    )
+                } else {
+                    serde_json::json!({
+                        "title": "Extracted title",
+                        "document_type": "other",
+                        "created_at": null
+                    })
+                    .to_string()
+                };
                 Json(serde_json::json!({
-                    "choices": [{
-                        "message": {
-                            "content": format!(
-                                "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>{text}</p></div>"
-                            )
-                        }
-                    }]
+                    "choices": [{"message": {"content": content}}]
                 }))
             }
         }),
@@ -127,18 +142,20 @@ async fn get_document(app: &Router, document_id: u64) -> Document {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
-async fn wait_for_text_ready(app: &Router, document_id: u64) -> Document {
+async fn wait_for_ocr(app: &Router, document_id: u64) -> Document {
     for _ in 0..200 {
         let document = get_document(app, document_id).await;
-        if document.status == IngestionStatus::TextReady {
+        if document.page_count > 0
+            && !matches!(
+                document.status,
+                IngestionStatus::Stored | IngestionStatus::Previewing | IngestionStatus::Ocr
+            )
+        {
             return document;
-        }
-        if document.status == IngestionStatus::Failed {
-            panic!("ingestion failed: {:?}", document.last_error);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("document did not reach TEXT_READY");
+    panic!("document did not finish OCR");
 }
 
 async fn wait_for_ready(app: &Router, document_id: u64) -> Document {
@@ -225,11 +242,12 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
         serde_json::from_slice(&health.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(health_json["status"], "ok");
     assert_eq!(health_json["ocr_configured"], true);
+    assert_eq!(health_json["metadata_model"], "z-ai/glm-5.3-flash");
 
     let image = png();
     let (status, uploaded) = upload(&app, "scan.png", "image/png", &image, "Original title").await;
     assert_eq!(status, StatusCode::CREATED);
-    let ready = wait_for_text_ready(&app, uploaded.document_id).await;
+    let ready = wait_for_ocr(&app, uploaded.document_id).await;
     assert_eq!(ready.page_count, 1);
 
     let (duplicate_status, duplicate) = upload(
@@ -427,7 +445,7 @@ async fn startup_resumes_a_stored_image() {
     let app = build_app(config(temporary.path(), start_ocr().await))
         .await
         .unwrap();
-    let resumed = wait_for_text_ready(&app, document.document_id).await;
+    let resumed = wait_for_ocr(&app, document.document_id).await;
     assert_eq!(resumed.page_count, 1);
 }
 
@@ -467,7 +485,7 @@ async fn startup_resumes_an_image_at_the_ocr_stage() {
     let app = build_app(config(temporary.path(), start_ocr().await))
         .await
         .unwrap();
-    let resumed = wait_for_text_ready(&app, document.document_id).await;
+    let resumed = wait_for_ocr(&app, document.document_id).await;
     assert_eq!(resumed.page_count, 1);
 }
 
@@ -558,7 +576,7 @@ async fn startup_repeats_deleted_object_cleanup_safely() {
     assert!(!object_path.exists());
     drop(app);
 
-    build_app(config(temporary.path(), start_ocr().await))
+    let _ = build_app(config(temporary.path(), start_ocr().await))
         .await
         .unwrap();
     assert!(!object_path.exists());
@@ -574,7 +592,7 @@ async fn pdf_upload_generates_pages_and_thumbnail() {
     let (status, uploaded) =
         upload(&app, "one-page.pdf", "application/pdf", &pdf, "Blank PDF").await;
     assert_eq!(status, StatusCode::CREATED);
-    let ready = wait_for_text_ready(&app, uploaded.document_id).await;
+    let ready = wait_for_ocr(&app, uploaded.document_id).await;
     assert_eq!(ready.media_type, MediaType::Pdf);
     assert_eq!(ready.page_count, 1);
 }

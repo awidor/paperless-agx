@@ -20,4 +20,5 @@ tracing.workspace = true
 
 
 [dev-dependencies]
+axum.workspace = true
 url.workspace = true

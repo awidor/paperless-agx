@@ -257,6 +257,7 @@ export interface components {
             ocr_configured: boolean;
             ocr_base_url: string;
             ocr_model: string;
+            metadata_model: string;
             embedding_configured: boolean;
             embedding_model: string;
         };
