@@ -49,3 +49,15 @@ tower-http = { version = "0.6.6", features = ["catch-panic", "fs", "trace"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 url = { version = "2.5.7", features = ["serde"] }
+
+[profile.dev.package]
+candle-core = { opt-level = 3 }
+candle-nn = { opt-level = 3 }
+candle-transformers = { opt-level = 3 }
+gemm = { opt-level = 3 }
+gemm-c32 = { opt-level = 3 }
+gemm-c64 = { opt-level = 3 }
+gemm-common = { opt-level = 3 }
+gemm-f16 = { opt-level = 3 }
+gemm-f32 = { opt-level = 3 }
+gemm-f64 = { opt-level = 3 }
