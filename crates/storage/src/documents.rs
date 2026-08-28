@@ -18,6 +18,7 @@ use futures::TryStreamExt;
 use lancedb::{
     Connection, Table,
     query::{ExecutableQuery, QueryBase},
+    table::NewColumnTransform,
 };
 use paperless_models::{Document, IngestionStatus, MediaType, MetadataSource, UploadMetadata};
 
@@ -212,15 +213,6 @@ impl DocumentRepository {
                 .column("title_source", sql_string(MetadataSource::Manual.as_str()));
             changed = true;
         }
-        if existing.document_type.is_none() && metadata.document_type.is_some() {
-            update = update
-                .column(
-                    "document_type",
-                    sql_string(metadata.document_type.as_deref().unwrap()),
-                )
-                .column("type_source", sql_string(MetadataSource::Manual.as_str()));
-            changed = true;
-        }
         if existing.created_at.is_none() && metadata.created_at.is_some() {
             update = update
                 .column(
@@ -254,13 +246,10 @@ impl DocumentRepository {
             .update()
             .only_if(format!("document_id = {}", document.document_id))
             .column("title", sql_optional_string(document.title.as_deref()))
-            .column(
-                "document_type",
-                sql_optional_string(document.document_type.as_deref()),
-            )
+            .column("sender", sql_optional_string(document.sender.as_deref()))
             .column("created_at", sql_optional_timestamp(document.created_at))
             .column("title_source", sql_optional_source(document.title_source))
-            .column("type_source", sql_optional_source(document.type_source))
+            .column("sender_source", sql_optional_source(document.sender_source))
             .column(
                 "created_at_source",
                 sql_optional_source(document.created_at_source),
@@ -316,16 +305,16 @@ impl DocumentRepository {
         Ok(batches.iter().any(|batch| batch.num_rows() > 0))
     }
 
-    pub async fn document_types(&self) -> Result<Vec<String>> {
-        let mut types = self
+    pub async fn senders(&self) -> Result<Vec<String>> {
+        let mut senders = self
             .list_active()
             .await?
             .into_iter()
-            .filter_map(|document| document.document_type)
+            .filter_map(|document| document.sender)
             .collect::<Vec<_>>();
-        types.sort_unstable_by_key(|value| value.to_lowercase());
-        types.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-        Ok(types)
+        senders.sort_unstable_by_key(|value| value.to_lowercase());
+        senders.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        Ok(senders)
     }
 }
 
@@ -336,11 +325,36 @@ async fn open_or_create_documents(connection: &Connection) -> Result<Table> {
         .await
         .context("list LanceDB tables")?;
     if names.iter().any(|name| name == DOCUMENTS_TABLE) {
-        connection
+        let table = connection
             .open_table(DOCUMENTS_TABLE)
             .execute()
             .await
-            .context("open documents table")
+            .context("open documents table")?;
+        let schema = table.schema().await?;
+        let missing = ["sender", "sender_source"]
+            .into_iter()
+            .filter(|name| schema.field_with_name(name).is_err())
+            .map(|name| Field::new(name, DataType::Utf8, true))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            table
+                .add_columns()
+                .transform(NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))))
+                .execute()
+                .await
+                .context("add document sender columns")?;
+        }
+        let obsolete = ["document_type", "type_source"]
+            .into_iter()
+            .filter(|name| schema.field_with_name(name).is_ok())
+            .collect::<Vec<_>>();
+        if !obsolete.is_empty() {
+            table
+                .drop_columns(&obsolete)
+                .await
+                .context("drop document type columns")?;
+        }
+        Ok(table)
     } else {
         connection
             .create_empty_table(DOCUMENTS_TABLE, document_schema())
@@ -374,12 +388,12 @@ pub fn document_schema() -> SchemaRef {
         Field::new("media_type", DataType::Utf8, false),
         Field::new("filename", DataType::Utf8, false),
         Field::new("title", DataType::Utf8, true),
-        Field::new("document_type", DataType::Utf8, true),
+        Field::new("sender", DataType::Utf8, true),
         timestamp_field("created_at", true),
         timestamp_field("added_at", false),
         timestamp_field("updated_at", false),
         Field::new("title_source", DataType::Utf8, true),
-        Field::new("type_source", DataType::Utf8, true),
+        Field::new("sender_source", DataType::Utf8, true),
         Field::new("created_at_source", DataType::Utf8, true),
         Field::new("page_count", DataType::UInt32, false),
         Field::new("file_size", DataType::UInt64, false),
@@ -408,7 +422,7 @@ fn document_batch(document: &Document) -> Result<RecordBatch> {
         Arc::new(StringArray::from(vec![document.media_type.as_str()])),
         Arc::new(StringArray::from(vec![document.filename.as_str()])),
         Arc::new(StringArray::from(vec![document.title.as_deref()])),
-        Arc::new(StringArray::from(vec![document.document_type.as_deref()])),
+        Arc::new(StringArray::from(vec![document.sender.as_deref()])),
         Arc::new(timestamp_array(document.created_at)),
         Arc::new(timestamp_array(Some(document.added_at))),
         Arc::new(timestamp_array(Some(document.updated_at))),
@@ -416,7 +430,7 @@ fn document_batch(document: &Document) -> Result<RecordBatch> {
             document.title_source.map(MetadataSource::as_str),
         ])),
         Arc::new(StringArray::from(vec![
-            document.type_source.map(MetadataSource::as_str),
+            document.sender_source.map(MetadataSource::as_str),
         ])),
         Arc::new(StringArray::from(vec![
             document.created_at_source.map(MetadataSource::as_str),
@@ -458,12 +472,12 @@ fn document_from_batch(batch: &RecordBatch, row: usize) -> Result<Document> {
             .map_err(anyhow::Error::msg)?,
         filename: string_column(batch, "filename")?.value(row).to_owned(),
         title: optional_string(batch, "title", row)?,
-        document_type: optional_string(batch, "document_type", row)?,
+        sender: optional_string(batch, "sender", row)?,
         created_at: optional_timestamp(batch, "created_at", row)?,
         added_at: required_timestamp(batch, "added_at", row)?,
         updated_at: required_timestamp(batch, "updated_at", row)?,
         title_source: optional_enum(batch, "title_source", row)?,
-        type_source: optional_enum(batch, "type_source", row)?,
+        sender_source: optional_enum(batch, "sender_source", row)?,
         created_at_source: optional_enum(batch, "created_at_source", row)?,
         page_count: u32_column(batch, "page_count")?.value(row),
         file_size: u64_column(batch, "file_size")?.value(row),
@@ -572,12 +586,12 @@ mod tests {
             media_type: MediaType::Pdf,
             filename: format!("document-{id}.pdf"),
             title: None,
-            document_type: None,
+            sender: None,
             created_at: None,
             added_at,
             updated_at: added_at,
             title_source: None,
-            type_source: None,
+            sender_source: None,
             created_at_source: None,
             page_count: 0,
             file_size: 12,
@@ -625,7 +639,6 @@ mod tests {
         let metadata = UploadMetadata {
             filename: "duplicate.pdf".into(),
             title: Some("Replacement title".into()),
-            document_type: Some("Invoice".into()),
             created_at: None,
         };
 
@@ -634,6 +647,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(merged.title.as_deref(), Some("Manual title"));
-        assert_eq!(merged.document_type.as_deref(), Some("Invoice"));
     }
 }

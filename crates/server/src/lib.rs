@@ -135,8 +135,12 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
             get(routes::get_thumbnail),
         )
         .route("/api/documents/{id}/retry", post(routes::retry_document))
+        .route(
+            "/api/documents/{id}/infer-metadata",
+            post(routes::infer_document_metadata),
+        )
         .route("/api/search", post(routes::search))
-        .route("/api/document-types", get(routes::document_types))
+        .route("/api/senders", get(routes::senders))
         .route("/api/openapi.json", get(routes::openapi))
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(DefaultBodyLimit::disable())

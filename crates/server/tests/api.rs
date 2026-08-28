@@ -60,7 +60,6 @@ async fn start_ocr_with_text(text: String) -> Url {
                 } else {
                     serde_json::json!({
                         "title": "Extracted title",
-                        "document_type": "other",
                         "created_at": null
                     })
                     .to_string()
@@ -334,7 +333,7 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
             Request::patch(format!("/api/documents/{}", uploaded.document_id))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    r#"{"title":"Edited title","document_type":"Receipt","created_at":"2025-02-03T00:00:00Z"}"#,
+                    r#"{"title":"Edited title","sender":"Acme Corp","created_at":"2025-02-03T00:00:00Z"}"#,
                 ))
                 .unwrap(),
         )
@@ -361,20 +360,16 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
     let listing: serde_json::Value =
         serde_json::from_slice(&listing.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(listing["total"], 1);
-    assert_eq!(listing["items"][0]["document_type"], "Receipt");
+    assert_eq!(listing["items"][0]["sender"], "Acme Corp");
 
-    let types = app
+    let senders = app
         .clone()
-        .oneshot(
-            Request::get("/api/document-types")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::get("/api/senders").body(Body::empty()).unwrap())
         .await
         .unwrap();
-    let types: serde_json::Value =
-        serde_json::from_slice(&types.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(types, serde_json::json!(["Receipt"]));
+    let senders: serde_json::Value =
+        serde_json::from_slice(&senders.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(senders, serde_json::json!(["Acme Corp"]));
 
     let deleted = app
         .clone()
@@ -425,12 +420,12 @@ async fn startup_resumes_a_stored_image() {
         media_type: MediaType::Image,
         filename: "interrupted.png".into(),
         title: None,
-        document_type: None,
+        sender: None,
         created_at: None,
         added_at: now,
         updated_at: now,
         title_source: None,
-        type_source: None,
+        sender_source: None,
         created_at_source: None,
         page_count: 0,
         file_size: object.file_size,
@@ -465,12 +460,12 @@ async fn startup_resumes_an_image_at_the_ocr_stage() {
         media_type: MediaType::Image,
         filename: "waiting-for-ocr.png".into(),
         title: None,
-        document_type: None,
+        sender: None,
         created_at: None,
         added_at: now,
         updated_at: now,
         title_source: None,
-        type_source: None,
+        sender_source: None,
         created_at_source: None,
         page_count: 1,
         file_size: object.file_size,
@@ -501,12 +496,12 @@ async fn startup_finishes_an_interrupted_index_commit() {
         media_type: MediaType::Image,
         filename: "indexed.png".into(),
         title: None,
-        document_type: None,
+        sender: None,
         created_at: None,
         added_at: now,
         updated_at: now,
         title_source: None,
-        type_source: None,
+        sender_source: None,
         created_at_source: None,
         page_count: 1,
         file_size: 1,
@@ -547,12 +542,12 @@ async fn startup_repeats_deleted_object_cleanup_safely() {
         media_type: MediaType::Image,
         filename: "deleted.png".into(),
         title: None,
-        document_type: None,
+        sender: None,
         created_at: None,
         added_at: now,
         updated_at: now,
         title_source: None,
-        type_source: None,
+        sender_source: None,
         created_at_source: None,
         page_count: 1,
         file_size: stored.file_size,

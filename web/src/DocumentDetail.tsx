@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, FileText, RefreshCw, Save, Trash2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText, RefreshCw, Save, Sparkles, Trash2, X } from "lucide-react";
 import {
   deleteDocument,
   getDocument,
   getPages,
+  inferDocumentMetadata,
   patchDocument,
   retryDocument,
   type Document,
@@ -12,13 +13,13 @@ import {
 import { PdfViewer } from "./PdfViewer";
 import { OcrTextLayer } from "./OcrTextLayer";
 
-export function DocumentDetail({ documentId, initialPage, types, onClose, onChanged }: { documentId: number; initialPage: number; types: string[]; onClose: () => void; onChanged: () => void }) {
+export function DocumentDetail({ documentId, initialPage, senders, onClose, onChanged }: { documentId: number; initialPage: number; senders: string[]; onClose: () => void; onChanged: () => void }) {
   const [document, setDocument] = useState<Document | null>(null);
   const [pages, setPages] = useState<PageInfo[]>([]);
   const [page, setPage] = useState(initialPage);
   const [tab, setTab] = useState<"preview" | "text">("preview");
   const [title, setTitle] = useState("");
-  const [documentType, setDocumentType] = useState("");
+  const [sender, setSender] = useState("");
   const [createdAt, setCreatedAt] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -26,15 +27,11 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
   const viewerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const style = window.document.body.style;
-    const previous = style.overflow;
-    style.overflow = "hidden";
-    return () => { style.overflow = previous; };
+    setPage(initialPage);
   }, []);
 
   useEffect(() => {
-    if (viewerRef.current) viewerRef.current.scrollTop = 0;
-    railRef.current?.querySelector("button.active")?.scrollIntoView({ block: "nearest", inline: "center" });
+    viewerRef.current?.scrollTo({ top: 0 });
   }, [page, tab]);
 
   async function load() {
@@ -44,7 +41,7 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
       setPages(nextPages);
       setPage((value) => Math.min(Math.max(value, 1), nextDocument.page_count || 1));
       setTitle(nextDocument.title || "");
-      setDocumentType(nextDocument.document_type || "");
+      setSender(nextDocument.sender || "");
       setCreatedAt(nextDocument.created_at?.slice(0, 10) || "");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The document failed to load.");
@@ -59,7 +56,7 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
     try {
       const updated = await patchDocument(documentId, {
         title: title.trim() || null,
-        document_type: documentType.trim() || null,
+        sender: sender.trim() || null,
         created_at: createdAt ? new Date(`${createdAt}T00:00:00`).toISOString() : null,
       });
       setDocument(updated);
@@ -85,6 +82,22 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
     }
   }
 
+  async function infer() {
+    setBusy(true);
+    try {
+      const updated = await inferDocumentMetadata(documentId);
+      setDocument(updated);
+      setTitle(updated.title || "");
+      setSender(updated.sender || "");
+      setCreatedAt(updated.created_at?.slice(0, 10) || "");
+      setError("");
+      onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "AI metadata failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function remove() {
     if (!window.confirm("Delete this document and its indexed data? This action cannot be undone.")) return;
@@ -103,7 +116,7 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
   const blocks = current?.blocks ?? [];
   const savedDate = document?.created_at?.slice(0, 10) || "";
   const dirty = document !== null
-    && (title !== (document.title || "") || documentType !== (document.document_type || "") || createdAt !== savedDate);
+    && (title !== (document.title || "") || sender !== (document.sender || "") || createdAt !== savedDate);
   return <div className="detail-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <aside className="detail-panel" aria-label="Document detail">
       <header className="detail-header"><div className="detail-heading"><p className="eyebrow">Document</p><h2 title={document?.filename}>{document?.title || document?.filename || "Loading"}</h2></div><button className="icon-button" aria-label="Close" onClick={onClose}><X /></button></header>
@@ -123,11 +136,11 @@ export function DocumentDetail({ documentId, initialPage, types, onClose, onChan
             <form onSubmit={save}>
               <h3>Document information</h3>
               <label><span className="metadata-label">Title{document.title_source === "ai" && <span className="ai-badge">AI</span>}</span><input value={title} maxLength={500} placeholder={document.filename} onChange={(event) => setTitle(event.target.value)} /></label>
-              <label><span className="metadata-label">Document type{document.type_source === "ai" && <span className="ai-badge">AI</span>}</span><input value={documentType} maxLength={100} list="document-types" placeholder="Unclassified" onChange={(event) => setDocumentType(event.target.value)} /><datalist id="document-types">{types.map((type) => <option key={type} value={type} />)}</datalist></label>
+              <label><span className="metadata-label">Sender{document.sender_source === "ai" && <span className="ai-badge">AI</span>}</span><input value={sender} maxLength={200} list="sender-options" placeholder="Unknown sender" onChange={(event) => setSender(event.target.value)} /><datalist id="sender-options">{senders.map((entry) => <option key={entry} value={entry} />)}</datalist></label>
               <label><span className="metadata-label">Document date{document.created_at_source === "ai" && <span className="ai-badge">AI</span>}</span><input type="date" value={createdAt} onChange={(event) => setCreatedAt(event.target.value)} /></label>
               <button className="primary-button" disabled={busy || !dirty}><Save size={17} /> {busy ? "Saving" : dirty ? "Save changes" : "Saved"}</button>
             </form>
-            <div className="document-facts"><h3>Processing</h3><dl><div><dt>Status</dt><dd><span className={`status status-${document.status.toLowerCase()} stamp`}>{document.status.toLowerCase().replaceAll("_", " ")}</span></dd></div><div><dt>Pages</dt><dd className="mono">{document.page_count}</dd></div><div><dt>Added</dt><dd className="mono">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(document.added_at))}</dd></div></dl>{document.last_error && <p className="card-error">{document.last_error}</p>}{document.status === "FAILED" && <button disabled={busy} onClick={() => void retry()}><RefreshCw size={16} /> Try reading again</button>}</div>
+            <div className="document-facts"><h3>Processing</h3><dl><div><dt>Status</dt><dd><span className={`status status-${document.status.toLowerCase()} stamp`}>{document.status.toLowerCase().replaceAll("_", " ")}</span></dd></div><div><dt>Pages</dt><dd className="mono">{document.page_count}</dd></div><div><dt>Added</dt><dd className="mono">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(document.added_at))}</dd></div></dl>{document.last_error && <p className="card-error">{document.last_error}</p>}{(document.status === "READY" || document.status === "FAILED") && <><button disabled={busy} onClick={() => void infer()}><Sparkles size={16} /> Run AI metadata</button><button disabled={busy} onClick={() => void retry()}><RefreshCw size={16} /> Reprocess document</button></>}</div>
             <button className="danger-button" disabled={busy} onClick={() => void remove()}><Trash2 size={17} /> Delete document</button>
           </section>
         </div>

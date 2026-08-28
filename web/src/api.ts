@@ -24,7 +24,7 @@ async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise
 export type LibraryQuery = {
   page: number;
   pageSize: number;
-  documentType: string;
+  sender: string;
   createdFrom: string;
   createdTo: string;
   sort: DocumentSort;
@@ -36,7 +36,7 @@ export function listDocuments(query: LibraryQuery): Promise<DocumentPageResult> 
     page_size: String(query.pageSize),
     sort: query.sort,
   });
-  if (query.documentType) params.set("document_type", query.documentType);
+  if (query.sender) params.set("sender", query.sender);
   if (query.createdFrom) params.set("created_from", new Date(`${query.createdFrom}T00:00:00`).toISOString());
   if (query.createdTo) params.set("created_to", new Date(`${query.createdTo}T23:59:59`).toISOString());
   return request(`/api/documents?${params}`);
@@ -72,6 +72,10 @@ export function retryDocument(id: number): Promise<Document> {
   return request(`/api/documents/${id}/retry`, { method: "POST" });
 }
 
+export function inferDocumentMetadata(id: number): Promise<Document> {
+  return request(`/api/documents/${id}/infer-metadata`, { method: "POST" });
+}
+
 
 export function searchDocuments(payload: SearchRequest): Promise<SearchResponse> {
   return request("/api/search", {
@@ -81,8 +85,8 @@ export function searchDocuments(payload: SearchRequest): Promise<SearchResponse>
   });
 }
 
-export function getDocumentTypes(): Promise<string[]> {
-  return request("/api/document-types");
+export function getSenders(): Promise<string[]> {
+  return request("/api/senders");
 }
 
 export function getHealth(): Promise<HealthResponse> {

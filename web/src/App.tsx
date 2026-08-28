@@ -10,8 +10,8 @@ import {
   X,
 } from "lucide-react";
 import {
-  getDocumentTypes,
   getHealth,
+  getSenders,
   listDocuments,
   searchDocuments,
   uploadDocument,
@@ -27,7 +27,7 @@ import { DocumentDetail } from "./DocumentDetail";
 const initialQuery: LibraryQuery = {
   page: 1,
   pageSize: 24,
-  documentType: "",
+  sender: "",
   createdFrom: "",
   createdTo: "",
   sort: "document_date_desc",
@@ -36,7 +36,7 @@ const initialQuery: LibraryQuery = {
 export default function App() {
   const [query, setQuery] = useState(initialQuery);
   const [library, setLibrary] = useState<DocumentPageResult | null>(null);
-  const [types, setTypes] = useState<string[]>([]);
+  const [senders, setSenders] = useState<string[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [searchText, setSearchText] = useState("");
   const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null);
@@ -60,6 +60,12 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+    void Promise.all([getSenders(), getHealth()])
+      .then(([nextSenders, nextHealth]) => {
+        setSenders(nextSenders);
+        setHealth(nextHealth);
+      })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : "Health data failed to load."));
   }, [query]);
 
   useEffect(() => {
@@ -68,14 +74,7 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  useEffect(() => {
-    void Promise.all([getDocumentTypes(), getHealth()])
-      .then(([nextTypes, nextHealth]) => {
-        setTypes(nextTypes);
-        setHealth(nextHealth);
-      })
-      .catch((cause) => setError(cause instanceof Error ? cause.message : "Health data failed to load."));
-  }, [library?.total]);
+
 
   const shownDocuments = searchHits?.map((hit) => hit.document) ?? library?.items ?? [];
   const terms = useMemo(() => searchText.trim().split(/\s+/).filter(Boolean), [searchText]);
@@ -93,7 +92,7 @@ export default function App() {
         query: value,
         page: 1,
         page_size: 100,
-        document_type: query.documentType || null,
+        sender: query.sender || null,
         created_from: query.createdFrom ? new Date(`${query.createdFrom}T00:00:00`).toISOString() : null,
         created_to: query.createdTo ? new Date(`${query.createdTo}T23:59:59`).toISOString() : null,
       });
@@ -242,8 +241,7 @@ export default function App() {
           </div>
         </section>
 
-        {filtersOpen && <FilterPanel query={query} types={types} onChange={(next) => { setQuery({ ...next, page: 1 }); setSearchHits(null); }} />}
-
+        {filtersOpen && <FilterPanel query={query} senders={senders} onChange={(next) => { setQuery({ ...next, page: 1 }); setSearchHits(null); }} />}
         {loading && !library ? (
           <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Loading your documents</p></div>
         ) : nothingFiled ? (
@@ -283,17 +281,17 @@ export default function App() {
 
       {dropping && <div className="drop-overlay" aria-hidden="true"><p><strong>Drop to upload</strong></p></div>}
 
-      {selected && <DocumentDetail documentId={selected.id} initialPage={selected.page} types={types} onClose={() => setSelected(null)} onChanged={() => { void refresh(); void getDocumentTypes().then(setTypes); }} />}
+      {selected && <DocumentDetail documentId={selected.id} initialPage={selected.page} senders={senders} onClose={() => setSelected(null)} onChanged={() => { void refresh(); }} />}
     </div>
   );
 }
 
-function FilterPanel({ query, types, onChange }: { query: LibraryQuery; types: string[]; onChange: (query: LibraryQuery) => void }) {
+function FilterPanel({ query, senders, onChange }: { query: LibraryQuery; senders: string[]; onChange: (query: LibraryQuery) => void }) {
   return <section className="filter-panel">
-    <label>Document type<select value={query.documentType} onChange={(event) => onChange({ ...query, documentType: event.target.value })}><option value="">All types</option>{types.map((type) => <option key={type}>{type}</option>)}</select></label>
+    <label>Sender<input list="sender-options" value={query.sender} placeholder="All senders" onChange={(event) => onChange({ ...query, sender: event.target.value })} /><datalist id="sender-options">{senders.map((sender) => <option key={sender} value={sender} />)}</datalist></label>
     <label>From<input type="date" value={query.createdFrom} onChange={(event) => onChange({ ...query, createdFrom: event.target.value })} /></label>
     <label>To<input type="date" value={query.createdTo} onChange={(event) => onChange({ ...query, createdTo: event.target.value })} /></label>
-    <label>Sort<select value={query.sort} onChange={(event) => onChange({ ...query, sort: event.target.value as DocumentSort })}><option value="document_date_desc">Document date · newest</option><option value="document_date_asc">Document date · oldest</option><option value="added_date_desc">Added · newest</option><option value="added_date_asc">Added · oldest</option><option value="title_asc">Title · A–Z</option><option value="title_desc">Title · Z–A</option><option value="file_size_desc">File size · largest</option><option value="file_size_asc">File size · smallest</option></select></label>
+    <label>Sort<select value={query.sort} onChange={(event) => onChange({ ...query, sort: event.target.value as DocumentSort })}><option value="document_date_desc">Document date · newest</option><option value="document_date_asc">Document date · oldest</option><option value="added_date_desc">Added · newest</option><option value="added_date_asc">Added · oldest</option><option value="title_asc">Title · A–Z</option><option value="title_desc">Title · Z–A</option><option value="sender_asc">Sender · A–Z</option><option value="sender_desc">Sender · Z–A</option><option value="file_size_desc">File size · largest</option><option value="file_size_asc">File size · smallest</option></select></label>
     <button className="text-button" onClick={() => onChange(initialQuery)}>Reset filters</button>
   </section>;
 }
@@ -321,7 +319,8 @@ function DocumentCard({ document, hit, terms, onOpen }: { document: Document; hi
     <div className="thumbnail-wrap"><img src={`/api/documents/${document.document_id}/thumbnails/1`} alt="" loading="lazy" /><span className={`status status-${document.status.toLowerCase()}`}>{document.status.toLowerCase().replaceAll("_", " ")}</span></div>
     <div className="card-body">
       <div className="card-title-row"><h3>{document.title || document.filename}</h3><span className="card-size">{formatBytes(document.file_size)}</span></div>
-      <p className="card-meta">{document.document_type || "Unclassified"} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(date))}</p>
+      <p className="card-meta">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(date))}</p>
+      {document.sender && <p className="card-meta">{document.sender}</p>}
       {hit && <p className="snippet"><Marked text={hit.snippet} terms={terms} /></p>}
       {document.last_error && <p className="card-error">{document.last_error}</p>}
     </div>

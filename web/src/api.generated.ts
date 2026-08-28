@@ -118,6 +118,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{id}/infer-metadata": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["inferDocumentMetadata"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/search": {
         parameters: {
             query?: never;
@@ -134,14 +150,14 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/document-types": {
+    "/api/senders": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["documentTypes"];
+        get: operations["senders"];
         put?: never;
         post?: never;
         delete?: never;
@@ -178,7 +194,7 @@ export interface components {
             media_type: "pdf" | "image";
             filename: string;
             title?: string | null;
-            document_type?: string | null;
+            sender?: string | null;
             /** Format: date-time */
             created_at?: string | null;
             /** Format: date-time */
@@ -188,7 +204,7 @@ export interface components {
             /** @enum {string|null} */
             title_source?: "ai" | "manual" | null;
             /** @enum {string|null} */
-            type_source?: "ai" | "manual" | null;
+            sender_source?: "ai" | "manual" | null;
             /** @enum {string|null} */
             created_at_source?: "ai" | "manual" | null;
             page_count: number;
@@ -203,7 +219,7 @@ export interface components {
         };
         DocumentPatch: {
             title?: string | null;
-            document_type?: string | null;
+            sender?: string | null;
             /** Format: date-time */
             created_at?: string | null;
         };
@@ -211,7 +227,7 @@ export interface components {
          * @default document_date_desc
          * @enum {string}
          */
-        DocumentSort: "document_date_desc" | "document_date_asc" | "added_date_desc" | "added_date_asc" | "title_asc" | "title_desc" | "file_size_asc" | "file_size_desc";
+        DocumentSort: "document_date_desc" | "document_date_asc" | "added_date_desc" | "added_date_asc" | "title_asc" | "title_desc" | "sender_asc" | "sender_desc" | "file_size_asc" | "file_size_desc";
         DocumentPageResult: {
             items: components["schemas"]["Document"][];
             page: number;
@@ -233,7 +249,7 @@ export interface components {
             query: string;
             page: number;
             page_size: number;
-            document_type?: string | null;
+            sender?: string | null;
             /** Format: date-time */
             created_from?: string | null;
             /** Format: date-time */
@@ -293,12 +309,7 @@ export interface operations {
     listDocuments: {
         parameters: {
             query?: {
-                page?: number;
-                page_size?: number;
-                document_type?: string | null;
-                created_from?: string | null;
-                created_to?: string | null;
-                sort?: components["schemas"]["DocumentSort"];
+                sender?: string | null;
             };
             header?: never;
             path?: never;
@@ -330,7 +341,6 @@ export interface operations {
                     /** Format: binary */
                     file: string;
                     title?: string;
-                    document_type?: string;
                     /** Format: date-time */
                     created_at?: string;
                 };
@@ -501,6 +511,28 @@ export interface operations {
             };
         };
     };
+    inferDocumentMetadata: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Metadata inferred */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
+        };
+    };
     search: {
         parameters: {
             query?: never;
@@ -525,7 +557,7 @@ export interface operations {
             };
         };
     };
-    documentTypes: {
+    senders: {
         parameters: {
             query?: never;
             header?: never;
@@ -534,7 +566,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Document types */
+            /** @description Known senders */
             200: {
                 headers: {
                     [name: string]: unknown;

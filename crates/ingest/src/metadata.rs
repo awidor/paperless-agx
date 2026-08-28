@@ -20,19 +20,19 @@ impl MetadataService {
         inferred: InferredMetadata,
     ) -> Result<Document> {
         let mut document = self.active(document_id).await?;
-        if document.title_source != Some(MetadataSource::Manual) {
+        if !is_manual_value(document.title_source, &document.title) {
             if let Some(title) = clean(inferred.title, 500, "title")? {
                 document.title = Some(title);
                 document.title_source = Some(MetadataSource::Ai);
             }
         }
-        if document.type_source != Some(MetadataSource::Manual) {
-            if let Some(document_type) = clean(inferred.document_type, 100, "document_type")? {
-                document.document_type = Some(document_type);
-                document.type_source = Some(MetadataSource::Ai);
+        if !is_manual_value(document.sender_source, &document.sender) {
+            if let Some(sender) = clean(inferred.sender, 200, "sender")? {
+                document.sender = Some(sender);
+                document.sender_source = Some(MetadataSource::Ai);
             }
         }
-        if document.created_at_source != Some(MetadataSource::Manual) {
+        if !is_manual_value(document.created_at_source, &document.created_at) {
             if let Some(created_at) = inferred.created_at {
                 document.created_at = Some(created_at);
                 document.created_at_source = Some(MetadataSource::Ai);
@@ -44,16 +44,14 @@ impl MetadataService {
     pub async fn apply_manual(&self, document_id: u64, patch: DocumentPatch) -> Result<Document> {
         let mut document = self.active(document_id).await?;
         if let Some(title) = patch.title {
-            document.title = clean(title, 500, "title")?;
-            document.title_source = Some(MetadataSource::Manual);
+            let cleaned = clean(title, 500, "title")?;
+            document.title_source = cleaned.is_some().then_some(MetadataSource::Manual);
+            document.title = cleaned;
         }
-        if let Some(document_type) = patch.document_type {
-            document.document_type = clean(document_type, 100, "document_type")?;
-            document.type_source = Some(MetadataSource::Manual);
-        }
-        if let Some(created_at) = patch.created_at {
-            document.created_at = created_at;
-            document.created_at_source = Some(MetadataSource::Manual);
+        if let Some(sender) = patch.sender {
+            let cleaned = clean(sender, 200, "sender")?;
+            document.sender_source = cleaned.is_some().then_some(MetadataSource::Manual);
+            document.sender = cleaned;
         }
         self.persist(&document).await
     }
@@ -71,7 +69,7 @@ impl MetadataService {
         self.chunks
             .update_filters(
                 document.document_id,
-                document.document_type.as_deref(),
+                document.sender.as_deref(),
                 document.created_at,
             )
             .await?;
@@ -93,6 +91,10 @@ fn clean(value: Option<String>, maximum: usize, field: &str) -> Result<Option<St
         bail!("{field} exceeds {maximum} characters");
     }
     Ok(value)
+}
+
+fn is_manual_value<T>(source: Option<MetadataSource>, value: &Option<T>) -> bool {
+    source == Some(MetadataSource::Manual) && value.is_some()
 }
 
 #[cfg(test)]
@@ -120,12 +122,12 @@ mod tests {
             media_type: MediaType::Image,
             filename: "scan.png".into(),
             title: None,
-            document_type: None,
+            sender: None,
             created_at: None,
             added_at: now,
             updated_at: now,
             title_source: None,
-            type_source: None,
+            sender_source: None,
             created_at_source: None,
             page_count: 1,
             file_size: 1,
@@ -148,7 +150,7 @@ mod tests {
                     text: "text".into(),
                     embedding: vec![0.0; 1024],
                     created_at: None,
-                    document_type: None,
+                    sender: None,
                 }],
             )
             .await
@@ -159,7 +161,7 @@ mod tests {
                 1,
                 DocumentPatch {
                     title: Some(Some("Manual title".into())),
-                    document_type: Some(Some("Receipt".into())),
+                    sender: None,
                     created_at: Some(Some(Utc.with_ymd_and_hms(2025, 2, 3, 0, 0, 0).unwrap())),
                 },
             )
@@ -170,7 +172,7 @@ mod tests {
                 1,
                 InferredMetadata {
                     title: Some("AI title".into()),
-                    document_type: Some("Invoice".into()),
+                    sender: None,
                     created_at: Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()),
                 },
             )
@@ -178,9 +180,62 @@ mod tests {
             .unwrap();
         assert_eq!(result.title.as_deref(), Some("Manual title"));
         assert_eq!(result.title_source, Some(MetadataSource::Manual));
-        assert_eq!(result.document_type.as_deref(), Some("Receipt"));
         let stored_chunks = chunks.list_document(1).await.unwrap();
-        assert_eq!(stored_chunks[0].document_type.as_deref(), Some("Receipt"));
         assert_eq!(stored_chunks[0].created_at, result.created_at);
+    }
+
+    #[tokio::test]
+    async fn manual_source_without_value_does_not_block_inference() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layout = DataLayout::create(temporary.path()).await.unwrap();
+        let documents = DocumentRepository::open(&layout).await.unwrap();
+        let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
+        let now = Utc::now();
+        let document = Document {
+            document_id: 1,
+            content_hash: [1; 32],
+            media_type: MediaType::Image,
+            filename: "scan.png".into(),
+            title: None,
+            sender: None,
+            created_at: None,
+            added_at: now,
+            updated_at: now,
+            title_source: Some(MetadataSource::Manual),
+            sender_source: None,
+            created_at_source: None,
+            page_count: 1,
+            file_size: 1,
+            status: IngestionStatus::Ready,
+            last_error: None,
+            retry_count: 0,
+            deleted_at: None,
+        };
+        documents.insert(&document).await.unwrap();
+        let service = MetadataService::new(documents, chunks);
+        service
+            .apply_manual(
+                1,
+                DocumentPatch {
+                    title: Some(Some(String::new())),
+                    sender: None,
+                    created_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        let result = service
+            .apply_inferred(
+                1,
+                InferredMetadata {
+                    title: Some("AI title".into()),
+                    sender: None,
+                    created_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.title.as_deref(), Some("AI title"));
+        assert_eq!(result.title_source, Some(MetadataSource::Ai));
     }
 }

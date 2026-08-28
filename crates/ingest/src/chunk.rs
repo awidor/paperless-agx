@@ -33,7 +33,7 @@ pub fn chunk_document(document: &Document, pages: &[DocumentPage]) -> Result<Vec
                 text,
                 embedding: Vec::new(),
                 created_at: document.created_at,
-                document_type: document.document_type.clone(),
+                sender: document.sender.clone(),
             });
         }
         document_char_base = document_char_base
@@ -163,12 +163,12 @@ mod tests {
             media_type: MediaType::Pdf,
             filename: "test.pdf".into(),
             title: None,
-            document_type: Some("invoice".into()),
+            sender: None,
             created_at: Some(now),
             added_at: now,
             updated_at: now,
             title_source: None,
-            type_source: None,
+            sender_source: None,
             created_at_source: None,
             page_count: 2,
             file_size: 1,

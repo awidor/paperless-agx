@@ -25,12 +25,12 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
         media_type: MediaType::Image,
         filename: "broken.png".into(),
         title: None,
-        document_type: None,
+        sender: None,
         created_at: None,
         added_at: now,
         updated_at: now,
         title_source: None,
-        type_source: None,
+        sender_source: None,
         created_at_source: None,
         page_count: 0,
         file_size: object.file_size,
@@ -86,12 +86,12 @@ async fn missing_embeddings_fails_after_metadata_inference() {
         media_type: MediaType::Image,
         filename: "statement.png".into(),
         title: None,
-        document_type: None,
+        sender: None,
         created_at: None,
         added_at: now,
         updated_at: now,
         title_source: None,
-        type_source: None,
+        sender_source: None,
         created_at_source: None,
         page_count: 1,
         file_size: object.file_size,
@@ -124,7 +124,7 @@ async fn missing_embeddings_fails_after_metadata_inference() {
             axum::Router::new().route(
                 "/v1/chat/completions",
                 axum::routing::post(|| async {
-                    r#"{"choices":[{"message":{"content":"{\"title\":\"August statement\",\"document_type\":\"statement\",\"created_at\":\"2026-08-01\"}"}}]}"#
+                    r#"{"choices":[{"message":{"content":"{\"title\":\"August statement\",\"sender\":\"Stadtwerke\",\"created_at\":\"2026-08-01\"}"}}]}"#
                 }),
             ),
         )
@@ -158,7 +158,6 @@ async fn missing_embeddings_fails_after_metadata_inference() {
     let failed = wait_for_status(&repository, document.document_id, IngestionStatus::Failed).await;
     unsafe { std::env::remove_var(key_name) };
     assert_eq!(failed.title.as_deref(), Some("August statement"));
-    assert_eq!(failed.document_type.as_deref(), Some("statement"));
     assert_eq!(
         failed.created_at.unwrap().to_rfc3339(),
         "2026-08-01T00:00:00+00:00"
@@ -189,12 +188,12 @@ async fn metadata_error_fails_the_document() {
         media_type: MediaType::Image,
         filename: "statement.png".into(),
         title: None,
-        document_type: None,
+        sender: None,
         created_at: None,
         added_at: now,
         updated_at: now,
         title_source: None,
-        type_source: None,
+        sender_source: None,
         created_at_source: None,
         page_count: 1,
         file_size: object.file_size,

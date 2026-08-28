@@ -75,8 +75,19 @@ impl IngestionQueue {
             .get(document_id)
             .await?
             .context("document does not exist")?;
-        if document.status != IngestionStatus::Failed {
-            bail!("only a failed document can be retried");
+        if document.deleted_at.is_some() {
+            bail!("deleted document cannot be retried");
+        }
+        if matches!(
+            document.status,
+            IngestionStatus::Stored
+                | IngestionStatus::Previewing
+                | IngestionStatus::Ocr
+                | IngestionStatus::TextReady
+                | IngestionStatus::Embedding
+                | IngestionStatus::Indexing
+        ) {
+            bail!("document is still processing");
         }
         self.repository.mark_retry(document_id).await?;
         self.enqueue(document_id).await
@@ -194,8 +205,9 @@ async fn process_document(
         ) {
             let page_rows = pages.list(document_id).await?;
             if document.status == IngestionStatus::TextReady {
+                let known_senders = repository.senders().await?;
                 let inferred = ocr
-                    .infer_metadata(page_rows.clone())
+                    .infer_metadata(page_rows.clone(), &known_senders)
                     .await
                     .context("metadata inference failed")?;
                 document = metadata

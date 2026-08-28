@@ -15,6 +15,7 @@ use lancedb::{
     database::CreateTableMode,
     index::{Index, scalar::FtsIndexBuilder},
     query::{ExecutableQuery, QueryBase},
+    table::NewColumnTransform,
 };
 use paperless_models::Chunk;
 
@@ -115,17 +116,14 @@ impl ChunkRepository {
     pub async fn update_filters(
         &self,
         document_id: u64,
-        document_type: Option<&str>,
+        sender: Option<&str>,
         created_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         let mut update = self
             .table
             .update()
             .only_if(format!("document_id = {document_id}"))
-            .column(
-                "document_type",
-                document_type.map_or_else(|| "NULL".into(), sql_string),
-            );
+            .column("sender", sender.map_or_else(|| "NULL".into(), sql_string));
         update = update.column(
             "created_at",
             created_at.map_or_else(
@@ -208,7 +206,7 @@ pub fn chunk_schema() -> SchemaRef {
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
             true,
         ),
-        Field::new("document_type", DataType::Utf8, true),
+        Field::new("sender", DataType::Utf8, true),
     ]))
 }
 
@@ -221,11 +219,33 @@ async fn open_or_create_chunks(connection: &Connection) -> Result<Table> {
         .iter()
         .any(|name| name == CHUNKS_TABLE)
     {
-        return connection
+        let table = connection
             .open_table(CHUNKS_TABLE)
             .execute()
             .await
-            .context("open chunks table");
+            .context("open chunks table")?;
+        if table.schema().await?.field_with_name("sender").is_err() {
+            table
+                .add_columns()
+                .transform(NewColumnTransform::AllNulls(Arc::new(Schema::new(vec![
+                    Field::new("sender", DataType::Utf8, true),
+                ]))))
+                .execute()
+                .await
+                .context("add chunk sender column")?;
+        }
+        if table
+            .schema()
+            .await?
+            .field_with_name("document_type")
+            .is_ok()
+        {
+            table
+                .drop_columns(&["document_type"])
+                .await
+                .context("drop chunk document_type column")?;
+        }
+        return Ok(table);
     }
     connection
         .create_empty_table(CHUNKS_TABLE, chunk_schema())
@@ -306,7 +326,7 @@ fn chunk_batch(chunks: &[Chunk]) -> Result<RecordBatch> {
             Arc::new(StringArray::from(
                 chunks
                     .iter()
-                    .map(|chunk| chunk.document_type.as_deref())
+                    .map(|chunk| chunk.sender.as_deref())
                     .collect::<Vec<_>>(),
             )),
         ],
@@ -325,7 +345,7 @@ fn chunks_from_batches(batches: &[RecordBatch]) -> Result<Vec<Chunk>> {
         let texts = column::<StringArray>(batch, "text")?;
         let embeddings = column::<FixedSizeListArray>(batch, "embedding")?;
         let dates = column::<TimestampMicrosecondArray>(batch, "created_at")?;
-        let types = column::<StringArray>(batch, "document_type")?;
+        let senders = column::<StringArray>(batch, "sender")?;
         for row in 0..batch.num_rows() {
             let embedding = embeddings.value(row);
             let embedding = embedding
@@ -346,7 +366,7 @@ fn chunks_from_batches(batches: &[RecordBatch]) -> Result<Vec<Chunk>> {
                 created_at: (!dates.is_null(row))
                     .then(|| DateTime::from_timestamp_micros(dates.value(row)))
                     .flatten(),
-                document_type: (!types.is_null(row)).then(|| types.value(row).to_owned()),
+                sender: (!senders.is_null(row)).then(|| senders.value(row).to_owned()),
             });
         }
     }
@@ -399,7 +419,7 @@ mod tests {
 
     use super::ChunkRepository;
 
-    fn chunk(document_id: u64, ordinal: u64, text: &str, category: &str) -> Chunk {
+    fn chunk(document_id: u64, ordinal: u64, text: &str, sender: &str) -> Chunk {
         let mut embedding = vec![0.0; 1024];
         embedding[(document_id - 1) as usize] = 1.0;
         Chunk {
@@ -415,7 +435,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2025, 1, document_id as u32, 0, 0, 0)
                     .unwrap(),
             ),
-            document_type: Some(category.into()),
+            sender: Some(sender.into()),
         }
     }
 
@@ -424,15 +444,15 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let repository = ChunkRepository::open(temporary.path()).await.unwrap();
         repository
-            .replace_document(1, vec![chunk(1, 1, "annual summit invoice", "invoice")])
+            .replace_document(1, vec![chunk(1, 1, "annual summit invoice", "Acme Corp")])
             .await
             .unwrap();
         repository
-            .replace_document(2, vec![chunk(2, 1, "summit meeting notes", "notes")])
+            .replace_document(2, vec![chunk(2, 1, "summit meeting notes", "Beta Ltd")])
             .await
             .unwrap();
         repository
-            .replace_document(1, vec![chunk(1, 1, "revised summit invoice", "invoice")])
+            .replace_document(1, vec![chunk(1, 1, "revised summit invoice", "Acme Corp")])
             .await
             .unwrap();
 
@@ -440,7 +460,7 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].text, "revised summit invoice");
         let lexical = repository
-            .lexical_candidates("summit", Some("document_type = 'invoice'"), 10)
+            .lexical_candidates("summit", Some("sender = 'Acme Corp'"), 10)
             .await
             .unwrap();
         assert_eq!(lexical.len(), 1);

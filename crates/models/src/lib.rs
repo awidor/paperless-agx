@@ -128,12 +128,12 @@ pub struct Document {
     pub media_type: MediaType,
     pub filename: String,
     pub title: Option<String>,
-    pub document_type: Option<String>,
+    pub sender: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub added_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub title_source: Option<MetadataSource>,
-    pub type_source: Option<MetadataSource>,
+    pub sender_source: Option<MetadataSource>,
     pub created_at_source: Option<MetadataSource>,
     pub page_count: u32,
     pub file_size: u64,
@@ -156,7 +156,6 @@ impl Document {
 pub struct UploadMetadata {
     pub filename: String,
     pub title: Option<String>,
-    pub document_type: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
 }
 
@@ -195,7 +194,7 @@ pub struct Chunk {
     pub text: String,
     pub embedding: Vec<f32>,
     pub created_at: Option<DateTime<Utc>>,
-    pub document_type: Option<String>,
+    pub sender: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +207,8 @@ pub enum DocumentSort {
     AddedDateAsc,
     TitleAsc,
     TitleDesc,
+    SenderAsc,
+    SenderDesc,
     FileSizeAsc,
     FileSizeDesc,
 }
@@ -217,7 +218,7 @@ pub enum DocumentSort {
 pub struct DocumentQuery {
     pub page: u32,
     pub page_size: u32,
-    pub document_type: Option<String>,
+    pub sender: Option<String>,
     pub created_from: Option<DateTime<Utc>>,
     pub created_to: Option<DateTime<Utc>>,
     pub sort: DocumentSort,
@@ -228,7 +229,7 @@ impl Default for DocumentQuery {
         Self {
             page: 1,
             page_size: 24,
-            document_type: None,
+            sender: None,
             created_from: None,
             created_to: None,
             sort: DocumentSort::DocumentDateDesc,
@@ -249,7 +250,7 @@ pub struct DocumentPatch {
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub title: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
-    pub document_type: Option<Option<String>>,
+    pub sender: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub created_at: Option<Option<DateTime<Utc>>>,
 }
@@ -259,7 +260,7 @@ pub struct SearchRequest {
     pub query: String,
     pub page: u32,
     pub page_size: u32,
-    pub document_type: Option<String>,
+    pub sender: Option<String>,
     pub created_from: Option<DateTime<Utc>>,
     pub created_to: Option<DateTime<Utc>>,
 }
@@ -284,7 +285,7 @@ pub struct SearchResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct InferredMetadata {
     pub title: Option<String>,
-    pub document_type: Option<String>,
+    pub sender: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
 }
 

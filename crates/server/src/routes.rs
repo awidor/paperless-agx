@@ -40,7 +40,6 @@ pub async fn upload_document(
 ) -> Result<impl IntoResponse, AppError> {
     let mut filename = None;
     let mut title = None;
-    let mut document_type = None;
     let mut created_at = None;
     let mut stored = None;
 
@@ -64,14 +63,6 @@ pub async fn upload_document(
             }
             "title" => {
                 title = nonempty(
-                    field
-                        .text()
-                        .await
-                        .map_err(|error| AppError::bad_request(error.into()))?,
-                );
-            }
-            "document_type" => {
-                document_type = nonempty(
                     field
                         .text()
                         .await
@@ -112,7 +103,6 @@ pub async fn upload_document(
     let metadata = UploadMetadata {
         filename: filename.unwrap_or_else(|| "upload".into()),
         title,
-        document_type,
         created_at,
     };
 
@@ -132,13 +122,10 @@ pub async fn upload_document(
         media_type,
         filename: metadata.filename,
         title_source: metadata.title.as_ref().map(|_| MetadataSource::Manual),
-        type_source: metadata
-            .document_type
-            .as_ref()
-            .map(|_| MetadataSource::Manual),
         created_at_source: metadata.created_at.map(|_| MetadataSource::Manual),
+        sender_source: None,
         title: metadata.title,
-        document_type: metadata.document_type,
+        sender: None,
         created_at: metadata.created_at,
         added_at: now,
         updated_at: now,
@@ -170,9 +157,9 @@ pub async fn list_documents(
         .into_iter()
         .filter(|document| {
             query
-                .document_type
+                .sender
                 .as_ref()
-                .is_none_or(|value| document.document_type.as_ref() == Some(value))
+                .is_none_or(|value| document.sender.as_ref() == Some(value))
                 && query
                     .created_from
                     .is_none_or(|date| document.created_at.is_some_and(|value| value >= date))
@@ -228,8 +215,8 @@ pub async fn delete_document(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn document_types(State(state): State<AppState>) -> Result<Json<Vec<String>>, AppError> {
-    Ok(Json(state.documents.document_types().await?))
+pub async fn senders(State(state): State<AppState>) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(state.documents.senders().await?))
 }
 
 pub async fn search(
@@ -394,6 +381,34 @@ pub async fn retry_document(
     Ok(Json(document))
 }
 
+pub async fn infer_document_metadata(
+    State(state): State<AppState>,
+    Path(document_id): Path<u64>,
+) -> Result<Json<Document>, AppError> {
+    let document = active_document(&state, document_id).await?;
+    match document.status {
+        IngestionStatus::Ready | IngestionStatus::Failed => {}
+        _ => {
+            return Err(AppError::bad_request(anyhow::anyhow!(
+                "document is still processing"
+            )));
+        }
+    }
+    let page_rows = state.pages.list(document_id).await?;
+    let known_senders = state.documents.senders().await?;
+    let inferred = state
+        .ocr
+        .infer_metadata(page_rows, &known_senders)
+        .await
+        .map_err(AppError::bad_request)?;
+    let document = state
+        .metadata
+        .apply_inferred(document_id, inferred)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(document))
+}
+
 fn sort_documents(documents: &mut [Document], sort: DocumentSort) {
     documents.sort_by(|left, right| match sort {
         DocumentSort::DocumentDateDesc => right
@@ -426,6 +441,18 @@ fn sort_documents(documents: &mut [Document], sort: DocumentSort) {
             .unwrap_or("")
             .cmp(left.title.as_deref().unwrap_or(""))
             .then_with(|| right.document_id.cmp(&left.document_id)),
+        DocumentSort::SenderAsc => left
+            .sender
+            .as_deref()
+            .unwrap_or("")
+            .cmp(right.sender.as_deref().unwrap_or(""))
+            .then_with(|| left.document_id.cmp(&right.document_id)),
+        DocumentSort::SenderDesc => right
+            .sender
+            .as_deref()
+            .unwrap_or("")
+            .cmp(left.sender.as_deref().unwrap_or(""))
+            .then_with(|| right.document_id.cmp(&left.document_id)),
         DocumentSort::FileSizeAsc => left
             .file_size
             .cmp(&right.file_size)
@@ -439,11 +466,8 @@ fn sort_documents(documents: &mut [Document], sort: DocumentSort) {
 
 fn search_filter(request: &SearchRequest) -> Option<String> {
     let mut filters = Vec::new();
-    if let Some(document_type) = request.document_type.as_deref() {
-        filters.push(format!(
-            "document_type = '{}'",
-            document_type.replace('\'', "''")
-        ));
+    if let Some(sender) = request.sender.as_deref() {
+        filters.push(format!("sender = '{}'", sender.replace('\'', "''")));
     }
     if let Some(created_from) = request.created_from {
         filters.push(format!(

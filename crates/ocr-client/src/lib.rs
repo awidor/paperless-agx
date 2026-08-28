@@ -15,7 +15,8 @@ use url::Url;
 const SURYA_FULL_PAGE_PROMPT: &str = "OCR this image to HTML. Each block is a div with data-label and data-bbox (x0 y0 x1 y1, normalized 0-1000).";
 const SURYA_MAX_TOKENS: u32 = 12_288;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
-const METADATA_PROMPT: &str = "Extract metadata from the OCR text.\nReturn only a JSON object with nullable string fields title, document_type, and created_at.\nUse a concise, human-readable title in the document's language. Do not copy the first line as the title.\nSet created_at to the date stated in the document, such as the letter date or invoice date. Never use a scan date or print timestamp.\nChoose document_type only from: invoice, receipt, contract, letter, statement, certificate, other. Prefer null when unsure; do not guess.\nUse YYYY-MM-DD for created_at.";
+const METADATA_PROMPT: &str = "Extract metadata from the OCR text.\nReturn only a JSON object with nullable string fields title, sender, and created_at.\nUse a concise, human-readable title in the document's language. Do not copy the first line as the title.\nSet sender to the company or person that issued or sent the document. Write the same sender with exactly the same wording in every document. Use null when the sender is not stated or unclear; do not guess.\nSet created_at to the date stated in the document, such as the letter date or invoice date. Never use a scan date or print timestamp.\nUse YYYY-MM-DD for created_at.";
+const KNOWN_SENDERS_LIMIT: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrConfig {
@@ -209,8 +210,12 @@ impl OcrClient {
             .context("build OCR request")
     }
 
-    pub async fn infer_metadata(&self, pages: Vec<DocumentPage>) -> Result<InferredMetadata> {
-        let request = self.prepare_metadata_request(&pages)?;
+    pub async fn infer_metadata(
+        &self,
+        pages: Vec<DocumentPage>,
+        known_senders: &[String],
+    ) -> Result<InferredMetadata> {
+        let request = self.prepare_metadata_request(&pages, known_senders)?;
         let bytes = self
             .execute(request, self.metadata.request_gate.clone(), "metadata")
             .await
@@ -218,8 +223,13 @@ impl OcrClient {
         parse_metadata_response(&bytes)
     }
 
-    fn prepare_metadata_request(&self, pages: &[DocumentPage]) -> Result<Request> {
+    fn prepare_metadata_request(
+        &self,
+        pages: &[DocumentPage],
+        known_senders: &[String],
+    ) -> Result<Request> {
         let api_key = &self.metadata.api_key;
+        let senders_block = known_senders_block(known_senders);
         let body = ChatRequest {
             model: self.metadata.model.clone(),
             max_tokens: 1_024,
@@ -228,7 +238,10 @@ impl OcrClient {
             messages: vec![ChatMessage {
                 role: "user",
                 content: vec![UserContent::Text {
-                    text: format!("{METADATA_PROMPT}\n\n{}", metadata_text(pages)),
+                    text: format!(
+                        "{METADATA_PROMPT}\n\n{senders_block}{}",
+                        metadata_text(pages)
+                    ),
                 }],
             }],
             response_format: Some(ResponseFormat {
@@ -341,10 +354,11 @@ struct ChatResponseMessage {
     content: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct RawMetadata {
     title: Option<String>,
-    document_type: Option<String>,
+    sender: Option<String>,
     created_at: Option<String>,
 }
 
@@ -369,7 +383,7 @@ fn parse_metadata_response(body: &[u8]) -> Result<InferredMetadata> {
         .trim();
     let raw: RawMetadata = serde_json::from_str(content).context("parse inferred metadata")?;
     let title = clean_metadata_value(raw.title, 500, "title")?;
-    let document_type = clean_metadata_value(raw.document_type, 100, "document_type")?;
+    let sender = clean_metadata_value(raw.sender, 200, "sender")?;
     let created_at = raw
         .created_at
         .map(|value| {
@@ -384,7 +398,7 @@ fn parse_metadata_response(body: &[u8]) -> Result<InferredMetadata> {
         .transpose()?;
     Ok(InferredMetadata {
         title,
-        document_type,
+        sender,
         created_at,
     })
 }
@@ -514,6 +528,23 @@ fn chat_completions_url(base_url: &Url, operation: &str) -> Result<Url> {
     .with_context(|| format!("build {operation} chat completions URL"))
 }
 
+fn known_senders_block(known_senders: &[String]) -> String {
+    if known_senders.is_empty() {
+        return String::new();
+    }
+    let listed = known_senders
+        .iter()
+        .take(KNOWN_SENDERS_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Senders already used in the library: {listed}.\n\
+         If the sender of this document matches one of them, return it exactly as written. \
+         Return a new sender only when it is genuinely a different company or person.\n\n"
+    )
+}
+
 fn metadata_text(pages: &[DocumentPage]) -> String {
     let mut pages = pages.iter().collect::<Vec<_>>();
     pages.sort_by_key(|page| page.page);
@@ -561,8 +592,8 @@ mod tests {
     use url::Url;
 
     use super::{
-        LlmConfig, METADATA_PROMPT, OcrClient, OcrConfig, PageImage, metadata_text,
-        parse_metadata_response, parse_page_response,
+        LlmConfig, METADATA_PROMPT, OcrClient, OcrConfig, PageImage, known_senders_block,
+        metadata_text, parse_metadata_response, parse_page_response,
     };
 
     static ENVIRONMENT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -644,11 +675,8 @@ mod tests {
         assert!(METADATA_PROMPT.contains("document's language"));
         assert!(METADATA_PROMPT.contains("Do not copy the first line"));
         assert!(METADATA_PROMPT.contains("Never use a scan date or print timestamp"));
-        assert!(
-            METADATA_PROMPT
-                .contains("invoice, receipt, contract, letter, statement, certificate, other")
-        );
-        assert!(METADATA_PROMPT.contains("Prefer null when unsure"));
+        assert!(METADATA_PROMPT.contains("fields title, sender, and created_at"));
+        assert!(!METADATA_PROMPT.contains("document_type"));
     }
 
     #[tokio::test]
@@ -677,7 +705,10 @@ mod tests {
         )
         .unwrap();
         let request = client
-            .prepare_metadata_request(&[document_page(1, "Invoice dated 2026-08-01")])
+            .prepare_metadata_request(
+                &[document_page(1, "Invoice dated 2026-08-01")],
+                &["Acme Corp".to_owned()],
+            )
             .unwrap();
 
         assert_eq!(
@@ -696,6 +727,10 @@ mod tests {
                 .unwrap()
                 .starts_with(METADATA_PROMPT)
         );
+        let text = body["messages"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Senders already used in the library: Acme Corp."));
+        assert!(text.contains("return it exactly as written"));
+        assert!(text.contains("Page 1:"));
         unsafe {
             std::env::remove_var(ocr_key);
             std::env::remove_var(llm_key);
@@ -712,6 +747,15 @@ mod tests {
         assert_eq!(text.chars().count(), 40_000);
         assert!(text.starts_with("Page 1:\nfirst page"));
         assert!(!text.contains("Page 2:"));
+    }
+
+    #[test]
+    fn known_senders_block_is_empty_without_known_senders() {
+        assert_eq!(known_senders_block(&[]), "");
+        assert_eq!(
+            known_senders_block(&["Acme Corp".to_owned()]),
+            "Senders already used in the library: Acme Corp.\nIf the sender of this document matches one of them, return it exactly as written. Return a new sender only when it is genuinely a different company or person.\n\n"
+        );
     }
 
     #[tokio::test]
@@ -762,7 +806,7 @@ mod tests {
         .unwrap();
 
         let error = client
-            .infer_metadata(vec![document_page(1, "Invoice dated 2026-08-01")])
+            .infer_metadata(vec![document_page(1, "Invoice dated 2026-08-01")], &[])
             .await
             .unwrap_err();
         unsafe {
@@ -806,13 +850,13 @@ mod tests {
         let body = serde_json::json!({
             "choices": [{
                 "message": {
-                    "content": "```json\n{\"title\":\"  Annual statement  \",\"document_type\":\"statement\",\"created_at\":\"2026-01-31\"}\n```"
+                    "content": "```json\n{\"title\":\"  Annual statement  \",\"sender\":\" Acme Corp \",\"created_at\":\"2026-01-31\"}\n```"
                 }
             }]
         });
         let inferred = parse_metadata_response(&serde_json::to_vec(&body).unwrap()).unwrap();
         assert_eq!(inferred.title.as_deref(), Some("Annual statement"));
-        assert_eq!(inferred.document_type.as_deref(), Some("statement"));
+        assert_eq!(inferred.sender.as_deref(), Some("Acme Corp"));
         assert_eq!(
             inferred.created_at.unwrap().to_rfc3339(),
             "2026-01-31T00:00:00+00:00"
@@ -820,7 +864,7 @@ mod tests {
 
         let invalid = serde_json::json!({
             "choices": [{"message": {
-                "content": "{\"title\":null,\"document_type\":null,\"created_at\":\"31/01/2026\"}"
+                "content": "{\"title\":null,\"created_at\":\"31/01/2026\"}"
             }}]
         });
         assert!(parse_metadata_response(&serde_json::to_vec(&invalid).unwrap()).is_err());
