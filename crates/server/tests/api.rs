@@ -11,7 +11,7 @@ use http_body_util::BodyExt;
 use image::{DynamicImage, ImageFormat};
 use paperless_models::{Document, IngestionStatus, MediaType};
 use paperless_ocr_client::OcrConfig;
-use paperless_server::{AppConfig, build_app};
+use paperless_server::{AppConfig, EmbeddingConfig, build_app};
 use paperless_storage::{DataLayout, DocumentRepository, ObjectStore};
 use tower::ServiceExt;
 use url::Url;
@@ -35,16 +35,25 @@ fn config(data_dir: &Path, base_url: Url) -> AppConfig {
 }
 
 async fn start_ocr() -> Url {
+    start_ocr_with_text("Recognized page text".into()).await
+}
+
+async fn start_ocr_with_text(text: String) -> Url {
     let app = Router::new().route(
         "/v1/chat/completions",
-        post(|| async {
-            Json(serde_json::json!({
-                "choices": [{
-                    "message": {
-                        "content": "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>Recognized page text</p></div>"
-                    }
-                }]
-            }))
+        post(move || {
+            let text = text.clone();
+            async move {
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {
+                            "content": format!(
+                                "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>{text}</p></div>"
+                            )
+                        }
+                    }]
+                }))
+            }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -130,6 +139,73 @@ async fn wait_for_text_ready(app: &Router, document_id: u64) -> Document {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("document did not reach TEXT_READY");
+}
+
+async fn wait_for_ready(app: &Router, document_id: u64) -> Document {
+    for _ in 0..1_200 {
+        let document = get_document(app, document_id).await;
+        if document.status == IngestionStatus::Ready {
+            return document;
+        }
+        if document.status == IngestionStatus::Failed {
+            panic!("ingestion failed: {:?}", document.last_error);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let document = get_document(app, document_id).await;
+    panic!("document stopped at {}", document.status);
+}
+
+#[tokio::test]
+async fn upload_with_embeddings_reaches_ready_and_is_searchable() {
+    let Some(model_dir) =
+        std::env::var_os("PAPERLESS_HARRIER_MODEL_DIR").map(std::path::PathBuf::from)
+    else {
+        eprintln!("PAPERLESS_HARRIER_MODEL_DIR is not set; skipping embedding E2E test");
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let mut settings = config(
+        temporary.path(),
+        start_ocr_with_text("Recognized page text. ".repeat(150)).await,
+    );
+    settings.embeddings = Some(EmbeddingConfig {
+        model_dir,
+        max_concurrency: 1,
+    });
+    let app = build_app(settings).await.unwrap();
+
+    let (status, document) =
+        upload(&app, "searchable.png", "image/png", &png(), "Searchable").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let ready = wait_for_ready(&app, document.document_id).await;
+    assert_eq!(ready.status, IngestionStatus::Ready);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/search")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "query": "recognized page text",
+                        "page": 1,
+                        "page_size": 10
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let results: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(results["total"], 1);
+    assert_eq!(
+        results["items"][0]["document"]["document_id"],
+        document.document_id
+    );
 }
 
 #[tokio::test]

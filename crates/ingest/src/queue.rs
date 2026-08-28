@@ -206,21 +206,13 @@ async fn process_document(
         }
     }
 
-    if document.status == IngestionStatus::Indexing {
-        repository
-            .set_status(document_id, IngestionStatus::Ready, None)
-            .await?;
-        return Ok(());
-    }
-
-    let Some(embeddings) = embeddings else {
-        return Ok(());
-    };
-
     if matches!(
         document.status,
         IngestionStatus::TextReady | IngestionStatus::Embedding
     ) {
+        let Some(embeddings) = embeddings else {
+            return Ok(());
+        };
         let page_rows = pages.list(document_id).await?;
         if document.status == IngestionStatus::TextReady {
             match ocr.infer_metadata(page_rows.clone()).await {
@@ -252,6 +244,12 @@ async fn process_document(
             .set_status(document_id, IngestionStatus::Indexing, None)
             .await?;
         document.status = IngestionStatus::Indexing;
+    }
+
+    if document.status == IngestionStatus::Indexing {
+        repository
+            .set_status(document_id, IngestionStatus::Ready, None)
+            .await?;
     }
 
     Ok(())
