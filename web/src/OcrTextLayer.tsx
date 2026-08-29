@@ -3,7 +3,7 @@ import type { OcrBlock } from "./api";
 import { bindPageTextSelection } from "./pageTextSelection";
 
 const LINE_HEIGHT = 1.15;
-const FONT = '"Archivo Variable", Archivo, sans-serif';
+const FONT = '"IBM Plex Sans", system-ui, sans-serif';
 const SAMPLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789,.-";
 
 let advance = 0;

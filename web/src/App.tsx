@@ -6,7 +6,7 @@ import {
   LoaderCircle,
   Search,
   SlidersHorizontal,
-  UploadCloud,
+  Upload,
   X,
 } from "lucide-react";
 import {
@@ -17,21 +17,11 @@ import {
   uploadDocument,
   type Document,
   type DocumentPageResult,
-  type DocumentSort,
   type HealthResponse,
-  type LibraryQuery,
   type SearchHit,
 } from "./api";
 import { DocumentDetail } from "./DocumentDetail";
-
-const initialQuery: LibraryQuery = {
-  page: 1,
-  pageSize: 24,
-  sender: "",
-  createdFrom: "",
-  createdTo: "",
-  sort: "document_date_desc",
-};
+import { DocumentCard, FilterPanel, initialQuery } from "./library";
 
 export default function App() {
   const [query, setQuery] = useState(initialQuery);
@@ -47,6 +37,7 @@ export default function App() {
   const [dropping, setDropping] = useState(false);
   const [error, setError] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const uploadRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
 
@@ -160,11 +151,14 @@ export default function App() {
         event.preventDefault();
         searchRef.current?.focus();
       }
-      if (event.key === "Escape" && selected) setSelected(null);
+      if (event.key === "Escape") {
+        if (selected) setSelected(null);
+        else if (searchHits) clearSearch();
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selected]);
+  }, [selected, searchHits]);
 
   function clearSearch() {
     setSearchHits(null);
@@ -182,9 +176,8 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">P</span>
           <span className="brand-name">Paperless</span>
-          <span className="brand-chip">AGX</span>
+          <span className="brand-agx">AGX</span>
         </div>
         <form className="global-search" onSubmit={runSearch}>
           <Search size={18} aria-hidden="true" />
@@ -201,26 +194,15 @@ export default function App() {
             <kbd className="search-key">/</kbd>
           )}
         </form>
-        <div className="health-pill" title={health ? `OCR: ${health.ocr_model}\nEmbeddings: ${health.embedding_model}` : "Loading model status"}>
-          <span className={health?.ocr_configured && health?.embedding_configured ? "health-dot good" : "health-dot"} />
-          {health?.ocr_configured && health?.embedding_configured ? "Models ready" : "Models not ready"}
-        </div>
+        {health && !(health.ocr_configured && health.embedding_configured) && (
+          <div className="health-pill" title={`OCR: ${health.ocr_model}\nEmbeddings: ${health.embedding_model}`}>
+            <span className="health-dot" />
+            Models not ready
+          </div>
+        )}
       </header>
 
       <main>
-        <section className="intake" aria-label="Upload documents">
-          <label
-            className="upload-drop"
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => { event.preventDefault(); void upload(event.dataTransfer.files); }}
-          >
-            <UploadCloud size={20} aria-hidden="true" />
-            <span>Drop files here or click to browse</span>
-            <small>PDF, PNG, JPEG, TIFF, WebP — processed on this machine</small>
-            <input type="file" multiple accept="application/pdf,image/png,image/jpeg,image/tiff,image/webp" onChange={(event) => event.target.files && void upload(event.target.files)} />
-          </label>
-        </section>
-
         {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")} aria-label="Dismiss error"><X size={16} /></button></div>}
 
         <section className="library-toolbar">
@@ -229,10 +211,22 @@ export default function App() {
             <span className="toolbar-count">
               {searchHits
                 ? <>“{searchText.trim()}” · {searchHits.length} {searchHits.length === 1 ? "document" : "documents"}</>
-                : <>{library?.total ?? 0} {library?.total === 1 ? "document" : "documents"}</>}
+                : library && <>{library.total} {library.total === 1 ? "document" : "documents"}</>}
             </span>
           </div>
           <div className="toolbar-actions">
+            <button className="upload-button" onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Upload</button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              accept="application/pdf,image/png,image/jpeg,image/tiff,image/webp"
+              onChange={(event) => {
+                if (event.target.files) void upload(event.target.files);
+                event.target.value = "";
+              }}
+            />
             <button className={filtersOpen ? "active" : ""} onClick={() => setFiltersOpen((value) => !value)}><SlidersHorizontal size={16} /> Filters</button>
             <div className="segmented">
               <button aria-label="Grid view" className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}><Grid2X2 size={16} /></button>
@@ -244,11 +238,17 @@ export default function App() {
         {filtersOpen && <FilterPanel query={query} senders={senders} onChange={(next) => { setQuery({ ...next, page: 1 }); setSearchHits(null); }} />}
         {loading && !library ? (
           <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Loading your documents</p></div>
+        ) : !library ? (
+          <div className="empty-state">
+            <h3>The library could not be loaded</h3>
+            <p>Check that the Paperless AGX server is running, then try again.</p>
+            <button onClick={() => void refresh()}>Try again</button>
+          </div>
         ) : nothingFiled ? (
           <div className="empty-state">
             <FileSearch size={36} aria-hidden="true" />
             <h3>No documents yet</h3>
-            <p>Upload a PDF or an image to get started, or drag files anywhere on this page.</p>
+            <p>Drop files anywhere on this page, or use the Upload button. PDF, PNG, JPEG, TIFF and WebP are processed on this machine.</p>
           </div>
         ) : shownDocuments.length === 0 ? (
           <div className="empty-state">
@@ -286,49 +286,3 @@ export default function App() {
   );
 }
 
-function FilterPanel({ query, senders, onChange }: { query: LibraryQuery; senders: string[]; onChange: (query: LibraryQuery) => void }) {
-  return <section className="filter-panel">
-    <label>Sender<input list="sender-options" value={query.sender} placeholder="All senders" onChange={(event) => onChange({ ...query, sender: event.target.value })} /><datalist id="sender-options">{senders.map((sender) => <option key={sender} value={sender} />)}</datalist></label>
-    <label>From<input type="date" value={query.createdFrom} onChange={(event) => onChange({ ...query, createdFrom: event.target.value })} /></label>
-    <label>To<input type="date" value={query.createdTo} onChange={(event) => onChange({ ...query, createdTo: event.target.value })} /></label>
-    <label>Sort<select value={query.sort} onChange={(event) => onChange({ ...query, sort: event.target.value as DocumentSort })}><option value="document_date_desc">Document date · newest</option><option value="document_date_asc">Document date · oldest</option><option value="added_date_desc">Added · newest</option><option value="added_date_asc">Added · oldest</option><option value="title_asc">Title · A–Z</option><option value="title_desc">Title · Z–A</option><option value="sender_asc">Sender · A–Z</option><option value="sender_desc">Sender · Z–A</option><option value="file_size_desc">File size · largest</option><option value="file_size_asc">File size · smallest</option></select></label>
-    <button className="text-button" onClick={() => onChange(initialQuery)}>Reset filters</button>
-  </section>;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function Marked({ text, terms }: { text: string; terms: string[] }) {
-  const clean = terms.filter((term) => term.length > 0);
-  if (clean.length === 0) return <>{text}</>;
-  let pattern: RegExp;
-  try {
-    pattern = new RegExp(`(${clean.map(escapeRegExp).join("|")})`, "giu");
-  } catch {
-    return <>{text}</>;
-  }
-  const parts = text.split(pattern);
-  return <>{parts.map((part, index) => (index % 2 === 1 ? <mark key={index}>{part}</mark> : <span key={index}>{part}</span>))}</>;
-}
-
-function DocumentCard({ document, hit, terms, onOpen }: { document: Document; hit?: SearchHit; terms: string[]; onOpen: () => void }) {
-  const date = document.created_at || document.added_at;
-  return <button className="document-card" onClick={onOpen}>
-    <div className="thumbnail-wrap"><img src={`/api/documents/${document.document_id}/thumbnails/1`} alt="" loading="lazy" /><span className={`status status-${document.status.toLowerCase()}`}>{document.status.toLowerCase().replaceAll("_", " ")}</span></div>
-    <div className="card-body">
-      <div className="card-title-row"><h3>{document.title || document.filename}</h3><span className="card-size">{formatBytes(document.file_size)}</span></div>
-      <p className="card-meta">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(date))}</p>
-      {document.sender && <p className="card-meta">{document.sender}</p>}
-      {hit && <p className="snippet"><Marked text={hit.snippet} terms={terms} /></p>}
-      {document.last_error && <p className="card-error">{document.last_error}</p>}
-    </div>
-  </button>;
-}
-
-function formatBytes(value: number): string {
-  if (value < 1_024) return `${value} B`;
-  if (value < 1_048_576) return `${(value / 1_024).toFixed(1)} KB`;
-  return `${(value / 1_048_576).toFixed(1)} MB`;
-}

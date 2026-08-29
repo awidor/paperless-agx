@@ -1,4 +1,4 @@
-const HIGHLIGHT = "#3a5c82";
+const HIGHLIGHT = "#2b4acb";
 
 /**
  * Keeps drag selection sane inside an absolutely positioned page text layer,
