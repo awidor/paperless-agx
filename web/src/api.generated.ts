@@ -102,6 +102,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{id}/pages/{page}/image": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getPageImage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{id}/retry": {
         parameters: {
             query?: never;
@@ -244,6 +260,7 @@ export interface components {
             thumbnail_ready: boolean;
             text?: string | null;
             blocks: components["schemas"]["OcrBlock"][];
+            html?: string | null;
         };
         SearchRequest: {
             query: string;
@@ -481,6 +498,27 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description WebP thumbnail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getPageImage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                page: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebP page render at OCR resolution */
             200: {
                 headers: {
                     [name: string]: unknown;

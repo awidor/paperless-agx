@@ -93,7 +93,7 @@ impl PageRepository {
         let batches = self
             .table
             .query()
-            .only_if("blocks IS NULL")
+            .only_if("blocks IS NULL OR html IS NULL")
             .execute()
             .await
             .context("query OCR pages without layout")?
@@ -132,15 +132,20 @@ async fn open_or_create_pages(connection: &Connection) -> Result<Table> {
             .execute()
             .await
             .context("open pages table")?;
-        if table.schema().await?.field_with_name("blocks").is_err() {
-            table
-                .add_columns()
-                .transform(NewColumnTransform::AllNulls(Arc::new(Schema::new(vec![
-                    Field::new("blocks", DataType::Utf8, true),
-                ]))))
-                .execute()
-                .await
-                .context("add OCR block layout column")?;
+        for (column, context) in [
+            ("blocks", "add OCR block layout column"),
+            ("html", "add OCR page HTML column"),
+        ] {
+            if table.schema().await?.field_with_name(column).is_err() {
+                table
+                    .add_columns()
+                    .transform(NewColumnTransform::AllNulls(Arc::new(Schema::new(vec![
+                        Field::new(column, DataType::Utf8, true),
+                    ]))))
+                    .execute()
+                    .await
+                    .context(context)?;
+            }
         }
         Ok(table)
     } else {
@@ -158,6 +163,7 @@ pub fn page_schema() -> SchemaRef {
         Field::new("page", DataType::UInt32, false),
         Field::new("text", DataType::Utf8, false),
         Field::new("blocks", DataType::Utf8, true),
+        Field::new("html", DataType::Utf8, true),
         Field::new(
             "updated_at",
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
@@ -185,6 +191,9 @@ fn page_batch(pages: &[DocumentPage]) -> Result<RecordBatch> {
         Arc::new(StringArray::from_iter_values(
             blocks.iter().map(String::as_str),
         )),
+        Arc::new(StringArray::from_iter(
+            pages.iter().map(|page| page.html.as_deref()),
+        )),
         Arc::new(
             TimestampMicrosecondArray::from_iter_values(
                 pages.iter().map(|page| page.updated_at.timestamp_micros()),
@@ -202,6 +211,7 @@ fn pages_from_batches(batches: &[RecordBatch]) -> Result<Vec<DocumentPage>> {
         let page_numbers: &UInt32Array = column(batch, "page")?;
         let texts: &StringArray = column(batch, "text")?;
         let blocks: &StringArray = column(batch, "blocks")?;
+        let html: &StringArray = column(batch, "html")?;
         let updated: &TimestampMicrosecondArray = column(batch, "updated_at")?;
         for row in 0..batch.num_rows() {
             pages.push(DocumentPage {
@@ -213,6 +223,11 @@ fn pages_from_batches(batches: &[RecordBatch]) -> Result<Vec<DocumentPage>> {
                 } else {
                     serde_json::from_str(blocks.value(row))
                         .context("parse stored OCR page blocks")?
+                },
+                html: if html.is_null(row) {
+                    None
+                } else {
+                    Some(html.value(row).to_owned())
                 },
                 updated_at: DateTime::from_timestamp_micros(updated.value(row))
                     .context("stored OCR page has an invalid timestamp")?,
@@ -257,6 +272,7 @@ mod tests {
                 page: 1,
                 text: "first".into(),
                 blocks: vec![],
+                html: None,
                 updated_at: Utc::now(),
             },
             DocumentPage {
@@ -264,6 +280,7 @@ mod tests {
                 page: 2,
                 text: "second".into(),
                 blocks: vec![],
+                html: None,
                 updated_at: Utc::now(),
             },
         ];
@@ -277,6 +294,7 @@ mod tests {
                 bbox: [10, 20, 900, 120],
                 text: "replacement".into(),
             }],
+            html: Some("<div data-label=\"Text\" data-bbox=\"10 20 900 120\"><p>replacement</p></div>".into()),
             updated_at: Utc::now(),
         }];
         repository

@@ -94,13 +94,17 @@ async fn cleanup_document(
     }
     chunks.delete_document(document_id).await?;
     pages.delete_document(document_id).await?;
-    let thumbnails = layout.thumbnail_directory(document_id);
-    match tokio::fs::remove_dir_all(&thumbnails).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("remove thumbnails {}", thumbnails.display()));
+    for directory in [
+        layout.thumbnail_directory(document_id),
+        layout.page_image_directory(document_id),
+    ] {
+        match tokio::fs::remove_dir_all(&directory).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove renders {}", directory.display()));
+            }
         }
     }
     if !documents.has_active_hash(&document.content_hash).await? {

@@ -109,6 +109,7 @@ async fn missing_embeddings_fails_after_metadata_inference() {
                 page: 1,
                 text: "Account statement dated 2026-08-01".into(),
                 blocks: vec![],
+                html: None,
                 updated_at: now,
             }],
         )
@@ -211,6 +212,7 @@ async fn metadata_error_fails_the_document() {
                 page: 1,
                 text: "Account statement dated 2026-08-01".into(),
                 blocks: vec![],
+                html: None,
                 updated_at: now,
             }],
         )

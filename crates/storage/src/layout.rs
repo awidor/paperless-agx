@@ -8,6 +8,7 @@ pub struct DataLayout {
     pub objects: PathBuf,
     pub lance: PathBuf,
     pub thumbnails: PathBuf,
+    pub page_images: PathBuf,
     pub temporary: PathBuf,
 }
 
@@ -18,6 +19,7 @@ impl DataLayout {
             objects: root.join("objects"),
             lance: root.join("lance"),
             thumbnails: root.join("thumbnails"),
+            page_images: root.join("page-images"),
             temporary: root.join("tmp"),
             root,
         };
@@ -26,6 +28,7 @@ impl DataLayout {
             &layout.objects,
             &layout.lance,
             &layout.thumbnails,
+            &layout.page_images,
             &layout.temporary,
         ] {
             tokio::fs::create_dir_all(directory)
@@ -48,6 +51,15 @@ impl DataLayout {
         self.thumbnail_directory(document_id)
             .join(format!("{page}.webp"))
     }
+
+    pub fn page_image_directory(&self, document_id: u64) -> PathBuf {
+        self.page_images.join(document_id.to_string())
+    }
+
+    pub fn page_image_path(&self, document_id: u64, page: u32) -> PathBuf {
+        self.page_image_directory(document_id)
+            .join(format!("{page}.webp"))
+    }
 }
 
 pub fn hash_hex(hash: &[u8; 32]) -> String {
@@ -65,6 +77,7 @@ mod tests {
         assert!(layout.objects.is_dir());
         assert!(layout.lance.is_dir());
         assert!(layout.thumbnails.is_dir());
+        assert!(layout.page_images.is_dir());
         assert!(layout.temporary.is_dir());
         assert_eq!(
             layout.object_path(&[2; 32]),

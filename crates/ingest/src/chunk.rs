@@ -183,6 +183,7 @@ mod tests {
                 page: 1,
                 text: "First sentence. Second sentence.".into(),
                 blocks: vec![],
+                html: None,
                 updated_at: now,
             },
             DocumentPage {
@@ -190,6 +191,7 @@ mod tests {
                 page: 2,
                 text: "Page two.".into(),
                 blocks: vec![],
+                html: None,
                 updated_at: now,
             },
         ];

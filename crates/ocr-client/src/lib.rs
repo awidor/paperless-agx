@@ -88,6 +88,7 @@ pub struct OcrPage {
     pub page: u32,
     pub text: String,
     pub blocks: Vec<OcrBlock>,
+    pub html: String,
 }
 
 #[derive(Clone)]
@@ -347,6 +348,7 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatResponseMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -422,17 +424,22 @@ fn clean_metadata_value(
 
 fn parse_page_response(page: u32, body: &[u8]) -> Result<OcrPage> {
     let response: ChatResponse = serde_json::from_slice(body).context("parse OCR JSON response")?;
-    let html = response
+    let choice = response
         .choices
         .first()
-        .context("OCR response has no choices")?
-        .message
-        .content
-        .as_deref()
-        .unwrap_or_default();
+        .context("OCR response has no choices")?;
+    if choice.finish_reason.as_deref() == Some("length") {
+        bail!("OCR page {page} hit the {SURYA_MAX_TOKENS} token limit and is truncated");
+    }
+    let html = choice.message.content.as_deref().unwrap_or_default();
     let text = html2md::parse_html(html).trim().to_owned();
     let blocks = parse_ocr_blocks(html)?;
-    Ok(OcrPage { page, text, blocks })
+    Ok(OcrPage {
+        page,
+        text,
+        blocks,
+        html: html.to_owned(),
+    })
 }
 
 fn parse_ocr_blocks(html: &str) -> Result<Vec<OcrBlock>> {
@@ -823,6 +830,7 @@ mod tests {
             page,
             text: text.into(),
             blocks: vec![],
+            html: None,
             updated_at: Utc::now(),
         }
     }
@@ -843,6 +851,8 @@ mod tests {
         assert_eq!(page.blocks[0].text, "Title");
         assert_eq!(page.blocks[1].bbox, [0, 100, 1000, 200]);
         assert_eq!(page.blocks[1].text, "Body text");
+        assert!(page.html.contains("data-label=\"SectionHeader\""));
+        assert!(page.html.contains("<p>Body text</p>"));
     }
 
     #[test]

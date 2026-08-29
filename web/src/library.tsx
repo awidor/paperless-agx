@@ -36,12 +36,13 @@ function Marked({ text, terms }: { text: string; terms: string[] }) {
   return <>{parts.map((part, index) => (index % 2 === 1 ? <mark key={index}>{part}</mark> : <span key={index}>{part}</span>))}</>;
 }
 
-export function DocumentCard({ document, hit, terms, onOpen }: { document: Document; hit?: SearchHit; terms: string[]; onOpen: () => void }) {
+export function DocumentCard({ document, hit, terms, onOpen, onFilterSender }: { document: Document; hit?: SearchHit; terms: string[]; onOpen: () => void; onFilterSender: (sender: string) => void }) {
   const date = document.created_at || document.added_at;
+  const sender = document.sender;
   return <button className="document-card" onClick={onOpen}>
     <div className="thumbnail-wrap"><img key={document.status} src={`/api/documents/${document.document_id}/thumbnails/1`} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} /></div>
     <div className="card-body">
-      {document.sender && <p className="card-sender">{document.sender}</p>}
+      {sender && <p className="card-sender"><span className="card-sender-filter" title={`Filter by ${sender}`} onClick={(event) => { event.stopPropagation(); onFilterSender(sender); }}>{sender}</span></p>}
       <div className="card-title-row"><h3>{document.title || document.filename}</h3><span className="card-size">{formatBytes(document.file_size)}</span></div>
       <p className="card-meta">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(date))}</p>
       {document.status !== "READY" && <p className="card-status"><span className={`status status-${document.status.toLowerCase()}`}>{document.status.toLowerCase().replaceAll("_", " ")}</span></p>}

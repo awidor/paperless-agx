@@ -134,6 +134,10 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
             "/api/documents/{id}/thumbnails/{page}",
             get(routes::get_thumbnail),
         )
+        .route(
+            "/api/documents/{id}/pages/{page}/image",
+            get(routes::get_page_image),
+        )
         .route("/api/documents/{id}/retry", post(routes::retry_document))
         .route(
             "/api/documents/{id}/infer-metadata",

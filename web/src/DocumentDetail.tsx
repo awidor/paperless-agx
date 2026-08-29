@@ -11,6 +11,7 @@ import {
   type PageInfo,
 } from "./api";
 import { DocumentTitle } from "./DocumentTitle";
+import { DigitalPage } from "./DigitalPage";
 import { PdfViewer } from "./PdfViewer";
 import { OcrTextLayer } from "./OcrTextLayer";
 
@@ -127,7 +128,7 @@ export function DocumentDetail({ documentId, initialPage, senders, onClose, onCh
         <div className="detail-content">
           <section className="preview-column">
             <div className="document-viewer" ref={viewerRef}>
-              {tab === "text" ? <article className="ocr-text">{current?.text || "Text is not ready for this page."}</article> : document.media_type === "pdf" ? <PdfViewer url={`/api/documents/${documentId}/file`} page={page} blocks={blocks} /> : <div className="ocr-page-frame image-page-frame"><img src={`/api/documents/${documentId}/file`} alt={document.title || document.filename} /><OcrTextLayer blocks={blocks} /></div>}
+              {tab === "text" ? <DigitalPage documentId={documentId} page={current} /> : document.media_type === "pdf" ? <PdfViewer url={`/api/documents/${documentId}/file`} page={page} blocks={blocks} /> : <div className="ocr-page-frame image-page-frame"><img src={`/api/documents/${documentId}/file`} alt={document.title || document.filename} /><OcrTextLayer blocks={blocks} /></div>}
             </div>
             {tab === "preview" && blocks.length > 0 && <p className="selection-hint">Drag across the page text to select and copy it.</p>}
             <div className="page-controls"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={17} /> Previous</button><span>Page {page} of {document.page_count || 1}</span><button disabled={page >= document.page_count} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight size={17} /></button></div>

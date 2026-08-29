@@ -78,6 +78,43 @@ impl PreviewService {
         Ok(target)
     }
 
+    /// Full page render at OCR resolution, cached on disk. OCR block
+    /// coordinates are normalized against exactly this image, so crops taken
+    /// from it line up with the layout the OCR saw.
+    pub async fn ensure_page_image(&self, document: &Document, page: u32) -> Result<PathBuf> {
+        if page == 0 || (document.page_count != 0 && page > document.page_count) {
+            bail!("page {page} is outside document page range");
+        }
+        let target = self.layout.page_image_path(document.document_id, page);
+        if target.is_file() {
+            return Ok(target);
+        }
+        let _permit = self
+            .render_gate
+            .acquire()
+            .await
+            .context("preview render gate closed")?;
+        let source = self.layout.object_path(&document.content_hash);
+        let image = match document.media_type {
+            MediaType::Image => load_image(source).await?,
+            MediaType::Pdf => {
+                let rendered = render_pdf_page(&self.layout, &source, page, Some(OCR_DPI), None)
+                    .await?;
+                let image = load_image(rendered.clone()).await?;
+                tokio::fs::remove_file(rendered)
+                    .await
+                    .context("remove temporary PDF page render")?;
+                image
+            }
+        };
+        let directory = self.layout.page_image_directory(document.document_id);
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .context("create page image directory")?;
+        save_webp_atomic(image, directory, target.clone()).await?;
+        Ok(target)
+    }
+
     pub async fn render_ocr_batch(
         &self,
         document: &Document,

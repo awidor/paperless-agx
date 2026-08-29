@@ -345,6 +345,9 @@ pub async fn get_pages(
                 .get(&page)
                 .map(|stored| stored.blocks.clone())
                 .unwrap_or_default(),
+            html: stored_pages
+                .get(&page)
+                .and_then(|stored| stored.html.clone()),
         })
         .collect();
     Ok(Json(pages))
@@ -358,6 +361,19 @@ pub async fn get_thumbnail(
     let path = state
         .previews
         .ensure_thumbnail(&document, page)
+        .await
+        .map_err(AppError::bad_request)?;
+    stream_file(path, "image/webp").await
+}
+
+pub async fn get_page_image(
+    State(state): State<AppState>,
+    Path((document_id, page)): Path<(u64, u32)>,
+) -> Result<Response, AppError> {
+    let document = active_document(&state, document_id).await?;
+    let path = state
+        .previews
+        .ensure_page_image(&document, page)
         .await
         .map_err(AppError::bad_request)?;
     stream_file(path, "image/webp").await

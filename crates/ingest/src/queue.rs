@@ -289,6 +289,7 @@ async fn recognize_document(
             page: page.page,
             text: page.text,
             blocks: page.blocks,
+            html: Some(page.html),
             updated_at: Utc::now(),
         }));
         first_page += count;

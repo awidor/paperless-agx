@@ -170,6 +170,11 @@ export default function App() {
     setSelected({ id: document.document_id, page: hit?.page ?? 1 });
   }
 
+  function filterBySender(sender: string) {
+    setQuery((value) => ({ ...value, sender, page: 1 }));
+    setSearchHits(null);
+  }
+
   const nothingFiled = !searchHits && library?.total === 0;
 
   return (
@@ -265,6 +270,7 @@ export default function App() {
                 hit={searchHits?.find((item) => item.document.document_id === document.document_id)}
                 terms={searchHits ? terms : []}
                 onOpen={() => openDocument(document)}
+                onFilterSender={filterBySender}
               />
             ))}
           </div>

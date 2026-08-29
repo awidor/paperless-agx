@@ -172,6 +172,7 @@ pub struct DocumentPage {
     pub page: u32,
     pub text: String,
     pub blocks: Vec<OcrBlock>,
+    pub html: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -181,6 +182,7 @@ pub struct PageInfo {
     pub thumbnail_ready: bool,
     pub text: Option<String>,
     pub blocks: Vec<OcrBlock>,
+    pub html: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
