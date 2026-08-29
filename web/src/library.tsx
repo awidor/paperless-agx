@@ -41,10 +41,10 @@ export function DocumentCard({ document, hit, terms, onOpen }: { document: Docum
   return <button className="document-card" onClick={onOpen}>
     <div className="thumbnail-wrap"><img key={document.status} src={`/api/documents/${document.document_id}/thumbnails/1`} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} /></div>
     <div className="card-body">
+      {document.sender && <p className="card-sender">{document.sender}</p>}
       <div className="card-title-row"><h3>{document.title || document.filename}</h3><span className="card-size">{formatBytes(document.file_size)}</span></div>
       <p className="card-meta">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(date))}</p>
       {document.status !== "READY" && <p className="card-status"><span className={`status status-${document.status.toLowerCase()}`}>{document.status.toLowerCase().replaceAll("_", " ")}</span></p>}
-      {document.sender && <p className="card-meta">{document.sender}</p>}
       {hit && <p className="snippet"><Marked text={hit.snippet} terms={terms} /></p>}
       {document.last_error && <p className="card-error">{document.last_error}</p>}
     </div>
