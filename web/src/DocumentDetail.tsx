@@ -10,6 +10,7 @@ import {
   type Document,
   type PageInfo,
 } from "./api";
+import { DocumentTitle } from "./DocumentTitle";
 import { PdfViewer } from "./PdfViewer";
 import { OcrTextLayer } from "./OcrTextLayer";
 
@@ -119,7 +120,7 @@ export function DocumentDetail({ documentId, initialPage, senders, onClose, onCh
     && (title !== (document.title || "") || sender !== (document.sender || "") || createdAt !== savedDate);
   return <div className="detail-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <aside className="detail-panel" aria-label="Document detail">
-      <header className="detail-header"><div className="detail-heading"><p className="eyebrow">{document?.title ? document.filename : "Document"}</p><h2 title={document?.filename}>{document?.title || document?.filename || "Loading"}</h2></div><button className="icon-button" aria-label="Close" onClick={onClose}><X /></button></header>
+      <header className="detail-header"><div className="detail-heading"><p className="eyebrow">{document?.title ? document.filename : "Document"}</p><h2 title={document?.filename}>{document ? <DocumentTitle document={document} /> : "Loading"}</h2></div><button className="icon-button" aria-label="Close" onClick={onClose}><X /></button></header>
       {error && <div className="error-banner">{error}</div>}
       {!document ? <div className="empty-state">Loading document</div> : <>
         <div className="detail-tabs"><button className={tab === "preview" ? "active" : ""} onClick={() => setTab("preview")}>Preview</button><button className={tab === "text" ? "active" : ""} onClick={() => setTab("text")}><FileText size={16} /> OCR text</button></div>
