@@ -7,9 +7,12 @@ export type DocumentSort = components["schemas"]["DocumentSort"];
 export type HealthResponse = components["schemas"]["HealthResponse"];
 export type OcrBlock = components["schemas"]["OcrBlock"];
 export type PageInfo = components["schemas"]["PageInfo"];
+export type SearchPassage = components["schemas"]["SearchPassage"];
+export type SearchInterpretation = components["schemas"]["SearchInterpretation"];
 export type SearchHit = components["schemas"]["SearchHit"];
 export type SearchRequest = components["schemas"]["SearchRequest"];
 export type SearchResponse = components["schemas"]["SearchResponse"];
+export type SearchAnswerResponse = components["schemas"]["SearchAnswerResponse"];
 
 async function responseBody<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -88,6 +91,14 @@ export function searchDocuments(payload: SearchRequest): Promise<SearchResponse>
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
+  });
+}
+
+export function answerSearch(query: string, chunkIds: number[]): Promise<SearchAnswerResponse> {
+  return request("/api/search/answer", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query, chunk_ids: chunkIds }),
   });
 }
 

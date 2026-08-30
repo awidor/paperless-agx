@@ -166,6 +166,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/search/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["answerSearch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/senders": {
         parameters: {
             query?: never;
@@ -271,19 +287,50 @@ export interface components {
             created_from?: string | null;
             /** Format: date-time */
             created_to?: string | null;
+            /** @default false */
+            skip_inferred_sender: boolean;
+            /** @default false */
+            skip_inferred_dates: boolean;
+        };
+        SearchPassage: {
+            /** Format: uint64 */
+            chunk_id: number;
+            page: number;
+            char_start: number;
+            char_end: number;
+            snippet: string;
+            score: number;
         };
         SearchHit: {
             document: components["schemas"]["Document"];
+            /** Format: uint64 */
             best_chunk_id: number;
             page: number;
             snippet: string;
             score: number;
+            passages: components["schemas"]["SearchPassage"][];
+        };
+        SearchInterpretation: {
+            sender: string | null;
+            /** Format: date-time */
+            created_from: string | null;
+            /** Format: date-time */
+            created_to: string | null;
         };
         SearchResponse: {
             items: components["schemas"]["SearchHit"][];
             page: number;
             page_size: number;
             total: number;
+            interpretation: components["schemas"]["SearchInterpretation"];
+        };
+        SearchAnswerRequest: {
+            query: string;
+            chunk_ids: number[];
+        };
+        SearchAnswerResponse: {
+            answer: string | null;
+            citations: number[];
         };
         HealthResponse: {
             status: string;
@@ -606,6 +653,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SearchResponse"];
+                };
+            };
+        };
+    };
+    answerSearch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchAnswerRequest"];
+            };
+        };
+        responses: {
+            /** @description Citation-backed search answer */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchAnswerResponse"];
                 };
             };
         };

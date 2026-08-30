@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { OcrBlock } from "./api";
+import { matchesEvidence } from "./evidenceHighlight";
 import { bindPageTextSelection } from "./pageTextSelection";
 
 const LINE_HEIGHT = 1.15;
@@ -50,7 +51,7 @@ function fontSize(block: OcrBlock, boxWidth: number, boxHeight: number): number 
   return fitFontSize(block.text, block.bbox, boxWidth, boxHeight);
 }
 
-export function OcrTextLayer({ blocks }: { blocks: OcrBlock[] }) {
+export function OcrTextLayer({ blocks, highlight }: { blocks: OcrBlock[]; highlight?: string }) {
   const layerRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState<{ width: number; height: number } | null>(null);
 
@@ -80,7 +81,7 @@ export function OcrTextLayer({ blocks }: { blocks: OcrBlock[] }) {
     <div className="ocr-text-layer" ref={layerRef} aria-label="Selectable OCR text">
       {box && blocks.map((block, index) => (
         <span
-          className="ocr-positioned-block"
+          className={`ocr-positioned-block${matchesEvidence(block.text, highlight) ? " evidence-match" : ""}`}
           data-label={block.label}
           key={`${block.bbox.join("-")}-${index}`}
           style={{

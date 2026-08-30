@@ -50,13 +50,26 @@ async fn start_ocr_with_text(text: String) -> Url {
         post(move |Json(body): Json<serde_json::Value>| {
             let text = text.clone();
             async move {
-                let is_ocr = body["messages"][0]["content"]
-                    .as_array()
-                    .is_some_and(|content| content.iter().any(|item| item["type"] == "image_url"));
+                let content = body["messages"][0]["content"].as_array();
+                let is_ocr = content
+                    .is_some_and(|items| items.iter().any(|item| item["type"] == "image_url"));
+                let is_answer = content.is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("numbered evidence passages"))
+                    })
+                });
                 let content = if is_ocr {
                     format!(
                         "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>{text}</p></div>"
                     )
+                } else if is_answer {
+                    serde_json::json!({
+                        "answer": "The page contains recognized text.",
+                        "citations": [1]
+                    })
+                    .to_string()
                 } else {
                     serde_json::json!({
                         "title": "Extracted title",
@@ -222,6 +235,86 @@ async fn upload_with_embeddings_reaches_ready_and_is_searchable() {
         results["items"][0]["document"]["document_id"],
         document.document_id
     );
+    let passages = results["items"][0]["passages"].as_array().unwrap();
+    assert!(!passages.is_empty() && passages.len() <= 3);
+    assert_eq!(
+        results["items"][0]["best_chunk_id"],
+        passages[0]["chunk_id"]
+    );
+    let chunk_id = passages[0]["chunk_id"].as_u64().unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/search/answer")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "query": "What does the page contain?",
+                        "chunk_ids": [chunk_id]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let answer: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(answer["answer"], "The page contains recognized text.");
+    assert_eq!(answer["citations"], serde_json::json!([chunk_id]));
+}
+
+#[tokio::test]
+async fn answer_search_rejects_invalid_questions_and_chunk_lists() {
+    let temporary = tempfile::tempdir().unwrap();
+    let app = build_app(config(temporary.path(), start_ocr().await))
+        .await
+        .unwrap();
+
+    for body in [
+        serde_json::json!({"query": " ", "chunk_ids": [1]}),
+        serde_json::json!({"query": "invoice total", "chunk_ids": []}),
+        serde_json::json!({"query": "invoice total", "chunk_ids": [1, 1]}),
+        serde_json::json!({"query": "invoice total", "chunk_ids": (1..=13).collect::<Vec<_>>()}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/search/answer")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[test]
+fn old_search_payloads_default_new_fields() {
+    let request: paperless_models::SearchRequest = serde_json::from_value(serde_json::json!({
+        "query": "invoice",
+        "page": 1,
+        "page_size": 10,
+        "sender": null,
+        "created_from": null,
+        "created_to": null
+    }))
+    .unwrap();
+
+    assert!(!request.skip_inferred_sender);
+    assert!(!request.skip_inferred_dates);
+
+    let response: paperless_models::SearchResponse = serde_json::from_value(serde_json::json!({
+        "items": [],
+        "page": 1,
+        "page_size": 10,
+        "total": 0
+    }))
+    .unwrap();
+    assert_eq!(response.interpretation, Default::default());
 }
 
 #[tokio::test]

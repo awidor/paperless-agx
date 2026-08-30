@@ -267,6 +267,20 @@ pub struct SearchRequest {
     pub sender: Option<String>,
     pub created_from: Option<DateTime<Utc>>,
     pub created_to: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub skip_inferred_sender: bool,
+    #[serde(default)]
+    pub skip_inferred_dates: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchPassage {
+    pub chunk_id: u64,
+    pub page: u32,
+    pub char_start: u32,
+    pub char_end: u32,
+    pub snippet: String,
+    pub score: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,6 +290,15 @@ pub struct SearchHit {
     pub page: u32,
     pub snippet: String,
     pub score: f32,
+    #[serde(default)]
+    pub passages: Vec<SearchPassage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchInterpretation {
+    pub sender: Option<String>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_to: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,6 +307,20 @@ pub struct SearchResponse {
     pub page: u32,
     pub page_size: u32,
     pub total: u64,
+    #[serde(default)]
+    pub interpretation: SearchInterpretation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchAnswerRequest {
+    pub query: String,
+    pub chunk_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchAnswerResponse {
+    pub answer: Option<String>,
+    pub citations: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

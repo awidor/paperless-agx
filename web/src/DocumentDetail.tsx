@@ -15,7 +15,7 @@ import { DigitalPage } from "./DigitalPage";
 import { PdfViewer } from "./PdfViewer";
 import { OcrTextLayer } from "./OcrTextLayer";
 
-export function DocumentDetail({ documentId, initialPage, senders, onPageChange, onDirtyChange, onClose, onChanged }: { documentId: number; initialPage: number; senders: string[]; onPageChange: (page: number) => void; onDirtyChange: (dirty: boolean) => void; onClose: () => void; onChanged: () => void }) {
+export function DocumentDetail({ documentId, initialPage, highlight, highlightPage, senders, onPageChange, onDirtyChange, onClose, onChanged }: { documentId: number; initialPage: number; highlight?: string; highlightPage?: number; senders: string[]; onPageChange: (page: number) => void; onDirtyChange: (dirty: boolean) => void; onClose: () => void; onChanged: () => void }) {
   const [document, setDocument] = useState<Document | null>(null);
   const [pages, setPages] = useState<PageInfo[]>([]);
   const [page, setPage] = useState(initialPage);
@@ -169,6 +169,7 @@ export function DocumentDetail({ documentId, initialPage, senders, onPageChange,
 
   const current = pages.find((item) => item.page === page);
   const blocks = current?.blocks ?? [];
+  const pageHighlight = page === highlightPage ? highlight : undefined;
   const savedDate = document?.created_at?.slice(0, 10) || "";
   const dirty = document !== null
     && (title !== (document.title || "") || sender !== (document.sender || "") || createdAt !== savedDate);
@@ -195,7 +196,7 @@ export function DocumentDetail({ documentId, initialPage, senders, onPageChange,
         <div className="detail-content">
           <section className="preview-column" id="document-view-panel" role="tabpanel" aria-labelledby={tab === "preview" ? "preview-tab" : "text-tab"}>
             <div className="document-viewer" ref={viewerRef}>
-              {tab === "text" ? <DigitalPage documentId={documentId} page={current} /> : document.media_type === "pdf" ? <PdfViewer url={`/api/documents/${documentId}/file`} page={page} blocks={blocks} /> : <div className="ocr-page-frame image-page-frame"><img src={`/api/documents/${documentId}/file`} alt={document.title || document.filename} /><OcrTextLayer blocks={blocks} /></div>}
+              {tab === "text" ? <DigitalPage documentId={documentId} page={current} highlight={pageHighlight} /> : document.media_type === "pdf" ? <PdfViewer url={`/api/documents/${documentId}/file`} page={page} blocks={blocks} highlight={pageHighlight} /> : <div className="ocr-page-frame image-page-frame"><img src={`/api/documents/${documentId}/file`} alt={document.title || document.filename} /><OcrTextLayer blocks={blocks} highlight={pageHighlight} /></div>}
             </div>
             {tab === "preview" && blocks.length > 0 && <p className="selection-hint">Drag across the page text to select and copy it.</p>}
             <div className="page-controls"><button disabled={page <= 1} onClick={() => selectPage(page - 1)}><ChevronLeft size={17} /> Previous</button><span>Page {page} of {document.page_count || 1}</span><button disabled={page >= document.page_count} onClick={() => selectPage(page + 1)}>Next <ChevronRight size={17} /></button></div>

@@ -23,7 +23,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function Marked({ text, terms }: { text: string; terms: string[] }) {
+export function Marked({ text, terms }: { text: string; terms: string[] }) {
   const clean = terms.filter((term) => term.length > 0);
   if (clean.length === 0) return <>{text}</>;
   let pattern: RegExp;

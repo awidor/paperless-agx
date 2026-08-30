@@ -144,6 +144,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
             post(routes::infer_document_metadata),
         )
         .route("/api/search", post(routes::search))
+        .route("/api/search/answer", post(routes::answer_search))
         .route("/api/senders", get(routes::senders))
         .route("/api/openapi.json", get(routes::openapi))
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))

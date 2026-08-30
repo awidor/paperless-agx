@@ -1,4 +1,7 @@
-use std::io;
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -8,12 +11,13 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, TimeDelta, TimeZone, Utc};
 use futures::TryStreamExt;
 use paperless_models::{
     Document, DocumentPageResult, DocumentPatch, DocumentQuery, DocumentSort, HealthResponse,
-    IngestionStatus, MediaType, MetadataSource, PageInfo, SearchHit, SearchRequest, SearchResponse,
-    UploadMetadata,
+    IngestionStatus, MediaType, MetadataSource, PageInfo, SearchAnswerRequest,
+    SearchAnswerResponse, SearchHit, SearchInterpretation, SearchPassage, SearchRequest,
+    SearchResponse, UploadMetadata,
 };
 use paperless_search::{RankedChunk, collapse_to_documents, reciprocal_rank_fusion};
 use paperless_storage::StoredObject;
@@ -237,13 +241,27 @@ pub async fn search(
             "page must start at one and page_size must be between 1 and 100"
         )));
     }
+    let known_senders = if request.sender.is_none() && !request.skip_inferred_sender {
+        state.documents.senders().await?
+    } else {
+        Vec::new()
+    };
+    let interpretation = infer_search_interpretation(&request, &known_senders, Utc::now());
+    let mut effective_request = request.clone();
+    effective_request.sender = request
+        .sender
+        .clone()
+        .or_else(|| interpretation.sender.clone());
+    effective_request.created_from = request.created_from.or(interpretation.created_from);
+    effective_request.created_to = request.created_to.or(interpretation.created_to);
+
     let embeddings = state.embeddings.as_ref().ok_or_else(|| {
         AppError::service_unavailable(anyhow::anyhow!("embedding model is not configured"))
     })?;
     let query_embedding = embeddings
         .embed_query(request.query.trim().to_owned())
         .await?;
-    let filter = search_filter(&request);
+    let filter = search_filter(&effective_request);
     let lexical = state
         .chunks
         .lexical_candidates(&request.query, filter.as_deref(), 50)
@@ -265,6 +283,13 @@ pub async fn search(
     };
     let fused = reciprocal_rank_fusion(&ranked(lexical), &ranked(vector), 60.0);
     let ranked_documents = collapse_to_documents(&fused);
+    let mut passage_hits: HashMap<u64, Vec<(u64, f32)>> = HashMap::new();
+    for hit in &fused {
+        let passages = passage_hits.entry(hit.document_id).or_default();
+        if passages.len() < 3 {
+            passages.push((hit.chunk_id, hit.score));
+        }
+    }
     let mut documents = Vec::with_capacity(ranked_documents.len());
     for hit in ranked_documents {
         let Some(document) = state.documents.get(hit.document_id).await? else {
@@ -282,15 +307,30 @@ pub async fn search(
         .skip(start)
         .take(request.page_size as usize)
     {
-        let Some(chunk) = state.chunks.get(hit.best_chunk_id).await? else {
+        let mut passages = Vec::new();
+        for &(chunk_id, score) in passage_hits.get(&hit.document_id).into_iter().flatten() {
+            let Some(chunk) = state.chunks.get(chunk_id).await? else {
+                continue;
+            };
+            passages.push(SearchPassage {
+                chunk_id,
+                page: chunk.page_start,
+                char_start: chunk.char_start,
+                char_end: chunk.char_end,
+                snippet: chunk.text,
+                score,
+            });
+        }
+        let Some(best) = passages.first() else {
             continue;
         };
         items.push(SearchHit {
             document,
-            best_chunk_id: chunk.chunk_id,
-            page: chunk.page_start,
-            snippet: chunk.text,
-            score: hit.score,
+            best_chunk_id: best.chunk_id,
+            page: best.page,
+            snippet: best.snippet.clone(),
+            score: best.score,
+            passages,
         });
     }
     Ok(Json(SearchResponse {
@@ -298,6 +338,69 @@ pub async fn search(
         page: request.page,
         page_size: request.page_size,
         total,
+        interpretation,
+    }))
+}
+
+pub async fn answer_search(
+    State(state): State<AppState>,
+    Json(request): Json<SearchAnswerRequest>,
+) -> Result<Json<SearchAnswerResponse>, AppError> {
+    if request.query.trim().is_empty() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "search question must not be empty"
+        )));
+    }
+    let unique = request.chunk_ids.iter().copied().collect::<HashSet<_>>();
+    if !(1..=12).contains(&request.chunk_ids.len()) || unique.len() != request.chunk_ids.len() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "chunk_ids must contain between 1 and 12 unique IDs"
+        )));
+    }
+
+    let mut sources = Vec::with_capacity(request.chunk_ids.len());
+    for chunk_id in &request.chunk_ids {
+        let chunk =
+            state.chunks.get(*chunk_id).await?.ok_or_else(|| {
+                AppError::bad_request(anyhow::anyhow!("unknown chunk ID {chunk_id}"))
+            })?;
+        let document = active_document(&state, chunk.document_id).await?;
+        sources.push(format!(
+            "{}, page {}:\n{}",
+            document.title.as_deref().unwrap_or(&document.filename),
+            chunk.page_start,
+            chunk.text
+        ));
+    }
+
+    let generated = state
+        .ocr
+        .answer_question(request.query.trim(), &sources)
+        .await?;
+    let Some(answer) = generated.answer.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Json(SearchAnswerResponse {
+            answer: None,
+            citations: Vec::new(),
+        }));
+    };
+    if generated.citations.is_empty()
+        || generated
+            .citations
+            .iter()
+            .any(|index| *index >= request.chunk_ids.len())
+    {
+        return Ok(Json(SearchAnswerResponse {
+            answer: None,
+            citations: Vec::new(),
+        }));
+    }
+    Ok(Json(SearchAnswerResponse {
+        answer: Some(answer),
+        citations: generated
+            .citations
+            .into_iter()
+            .map(|index| request.chunk_ids[index])
+            .collect(),
     }))
 }
 
@@ -522,6 +625,180 @@ fn search_filter(request: &SearchRequest) -> Option<String> {
     (!filters.is_empty()).then(|| filters.join(" AND "))
 }
 
+fn infer_search_interpretation(
+    request: &SearchRequest,
+    known_senders: &[String],
+    now: DateTime<Utc>,
+) -> SearchInterpretation {
+    let words = normalized_words(&request.query);
+    let sender = (request.sender.is_none() && !request.skip_inferred_sender)
+        .then(|| {
+            known_senders
+                .iter()
+                .filter_map(|sender| {
+                    let sender_words = normalized_words(sender);
+                    (!sender_words.is_empty()
+                        && words
+                            .windows(sender_words.len())
+                            .any(|window| window == sender_words))
+                    .then_some((sender, sender_words.iter().map(String::len).sum::<usize>()))
+                })
+                .max_by_key(|(_, length)| *length)
+                .map(|(sender, _)| sender.clone())
+        })
+        .flatten();
+
+    let mut interpretation = SearchInterpretation {
+        sender,
+        ..Default::default()
+    };
+    if !request.skip_inferred_dates
+        && (request.created_from.is_none() || request.created_to.is_none())
+        && let Some((from, to)) = inferred_date_range(&words, now)
+    {
+        if request.created_from.is_none() {
+            interpretation.created_from = Some(from);
+        }
+        if request.created_to.is_none() {
+            interpretation.created_to = Some(to);
+        }
+    }
+    interpretation
+}
+
+fn normalized_words(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn inferred_date_range(
+    words: &[String],
+    now: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let month_year = words
+        .windows(2)
+        .filter_map(|pair| Some((parse_year(&pair[1])?, month_number(&pair[0])?)))
+        .filter_map(|(year, month)| month_range(year, month))
+        .collect::<Vec<_>>();
+    if !month_year.is_empty() {
+        return unique_range(month_year);
+    }
+
+    let relative = words
+        .windows(2)
+        .filter_map(|pair| {
+            let this = is_this(&pair[0]);
+            let last = is_last(&pair[0]);
+            if !(this || last) {
+                return None;
+            }
+            match pair[1].as_str() {
+                "year" | "jahr" => year_range(now.year() - i32::from(last)),
+                "month" | "monat" => {
+                    let (year, month) = if last {
+                        previous_month(now.year(), now.month())
+                    } else {
+                        (now.year(), now.month())
+                    };
+                    month_range(year, month)
+                }
+                month_name => {
+                    let month = month_number(month_name)?;
+                    let year = if last && month >= now.month() {
+                        now.year() - 1
+                    } else {
+                        now.year()
+                    };
+                    month_range(year, month)
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    if !relative.is_empty() {
+        return unique_range(relative);
+    }
+
+    let years = words
+        .iter()
+        .filter_map(|word| parse_year(word))
+        .filter_map(year_range)
+        .collect::<Vec<_>>();
+    unique_range(years)
+}
+
+fn unique_range(
+    mut ranges: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let first = ranges.pop()?;
+    ranges
+        .into_iter()
+        .all(|range| range == first)
+        .then_some(first)
+}
+
+fn parse_year(word: &str) -> Option<i32> {
+    (word.len() == 4 && word.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| word.parse().ok())
+        .flatten()
+        .filter(|year| (1000..=9999).contains(year))
+}
+
+fn is_this(word: &str) -> bool {
+    matches!(word, "this" | "dieser" | "diese" | "dieses" | "diesen")
+}
+
+fn is_last(word: &str) -> bool {
+    matches!(word, "last" | "letzter" | "letzte" | "letztes" | "letzten")
+}
+
+fn month_number(word: &str) -> Option<u32> {
+    match word {
+        "january" | "januar" => Some(1),
+        "february" | "februar" => Some(2),
+        "march" | "märz" | "maerz" => Some(3),
+        "april" => Some(4),
+        "may" | "mai" => Some(5),
+        "june" | "juni" => Some(6),
+        "july" | "juli" => Some(7),
+        "august" => Some(8),
+        "september" => Some(9),
+        "october" | "oktober" => Some(10),
+        "november" => Some(11),
+        "december" | "dezember" => Some(12),
+        _ => None,
+    }
+}
+
+fn previous_month(year: i32, month: u32) -> (i32, u32) {
+    if month == 1 {
+        (year - 1, 12)
+    } else {
+        (year, month - 1)
+    }
+}
+
+fn year_range(year: i32) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let start = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).single()?;
+    let next = Utc.with_ymd_and_hms(year + 1, 1, 1, 0, 0, 0).single()?;
+    Some((start, next - TimeDelta::microseconds(1)))
+}
+
+fn month_range(year: i32, month: u32) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let start = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single()?;
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let next = Utc
+        .with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
+        .single()?;
+    Some((start, next - TimeDelta::microseconds(1)))
+}
+
 async fn active_document(state: &AppState, document_id: u64) -> Result<Document, AppError> {
     state
         .documents
@@ -637,5 +914,95 @@ impl IntoResponse for AppError {
             self.source.to_string()
         };
         (self.status, Json(serde_json::json!({ "error": message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use paperless_models::SearchRequest;
+
+    use super::infer_search_interpretation;
+
+    fn request(query: &str) -> SearchRequest {
+        SearchRequest {
+            query: query.into(),
+            page: 1,
+            page_size: 10,
+            sender: None,
+            created_from: None,
+            created_to: None,
+            skip_inferred_sender: false,
+            skip_inferred_dates: false,
+        }
+    }
+
+    #[test]
+    fn search_interpretation_uses_whole_longest_sender_and_explicit_month() {
+        let interpretation = infer_search_interpretation(
+            &request("Allianz Versicherungs AG renewal from March 2025"),
+            &["Allianz".into(), "Allianz Versicherungs AG".into()],
+            Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap(),
+        );
+
+        assert_eq!(
+            interpretation.sender.as_deref(),
+            Some("Allianz Versicherungs AG")
+        );
+        assert_eq!(
+            interpretation.created_from,
+            Some(Utc.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap())
+        );
+        assert_eq!(
+            interpretation.created_to,
+            Some(
+                Utc.with_ymd_and_hms(2025, 3, 31, 23, 59, 59).unwrap()
+                    + chrono::TimeDelta::microseconds(999_999)
+            )
+        );
+    }
+
+    #[test]
+    fn search_interpretation_handles_relative_german_dates_and_respects_controls() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        let interpretation = infer_search_interpretation(
+            &request("Schreiben vom letzten März"),
+            &["Mär".into()],
+            now,
+        );
+        assert_eq!(
+            interpretation.created_from,
+            Some(Utc.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap())
+        );
+        assert_eq!(interpretation.sender, None);
+
+        let mut controlled = request("Allianz last year");
+        controlled.sender = Some("Explicit".into());
+        controlled.skip_inferred_dates = true;
+        assert_eq!(
+            infer_search_interpretation(&controlled, &["Allianz".into()], now),
+            Default::default()
+        );
+    }
+
+    #[test]
+    fn search_interpretation_handles_relative_periods_and_standalone_years() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap();
+        for (query, year, month) in [
+            ("this year", 2026, 1),
+            ("last year", 2025, 1),
+            ("this month", 2026, 8),
+            ("last month", 2026, 7),
+            ("invoice 2024", 2024, 1),
+            ("Januar 2023", 2023, 1),
+            ("this March", 2026, 3),
+            ("last March", 2026, 3),
+        ] {
+            assert_eq!(
+                infer_search_interpretation(&request(query), &[], now).created_from,
+                Some(Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).unwrap()),
+                "{query}"
+            );
+        }
     }
 }

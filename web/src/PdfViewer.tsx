@@ -3,6 +3,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type * as PdfjsModule from "pdfjs-dist";
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask, TextLayer } from "pdfjs-dist";
 import type { OcrBlock } from "./api";
+import { matchesEvidence } from "./evidenceHighlight";
 import { OcrTextLayer } from "./OcrTextLayer";
 import { bindPageTextSelection } from "./pageTextSelection";
 
@@ -16,7 +17,7 @@ function loadPdfjs(): Promise<typeof PdfjsModule> {
   return pdfjs;
 }
 
-export function PdfViewer({ url, page, blocks }: { url: string; page: number; blocks: OcrBlock[] }) {
+export function PdfViewer({ url, page, blocks, highlight }: { url: string; page: number; blocks: OcrBlock[]; highlight?: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
@@ -31,7 +32,7 @@ export function PdfViewer({ url, page, blocks }: { url: string; page: number; bl
     if (!host) return;
     const observer = new ResizeObserver((entries) => {
       const width = Math.floor(entries[0]?.contentRect.width ?? 0);
-      if (width < 320) return;
+      if (width < 120) return;
       setAvailable((current) => (Math.abs(current - width) < 8 ? current : width));
     });
     observer.observe(host);
@@ -97,6 +98,9 @@ export function PdfViewer({ url, page, blocks }: { url: string; page: number; bl
       textLayer = new module.TextLayer({ textContentSource: textContent, container, viewport });
       await textLayer.render();
       if (cancelled) return;
+      for (const span of container.querySelectorAll<HTMLElement>("span")) {
+        span.classList.toggle("evidence-match", matchesEvidence(span.textContent ?? "", highlight));
+      }
       unbind = bindPageTextSelection(container);
     })().catch((cause) => !cancelled && setError(cause instanceof Error ? cause.message : "The PDF page failed to render."));
     return () => {
@@ -105,7 +109,7 @@ export function PdfViewer({ url, page, blocks }: { url: string; page: number; bl
       renderTask?.cancel();
       textLayer?.cancel();
     };
-  }, [pdf, page, available]);
+  }, [pdf, page, available, highlight]);
 
   return (
     <div className="pdf-viewer" ref={hostRef}>
@@ -115,7 +119,7 @@ export function PdfViewer({ url, page, blocks }: { url: string; page: number; bl
         <div className="ocr-page-frame pdf-page-frame" style={size ?? undefined}>
           <canvas ref={canvasRef} className="pdf-canvas" aria-label={`PDF page ${page}`} />
           <div className="text-layer" ref={textLayerRef} aria-label="Selectable page text" />
-          {!embeddedText && <OcrTextLayer blocks={blocks} />}
+          {!embeddedText && <OcrTextLayer blocks={blocks} highlight={highlight} />}
         </div>
       )}
     </div>

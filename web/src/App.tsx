@@ -20,13 +20,13 @@ import {
   type DocumentSort,
   type HealthResponse,
   type LibraryQuery,
-  type SearchHit,
+  type SearchInterpretation,
 } from "./api";
 import { DocumentDetail } from "./DocumentDetail";
 import { DocumentCard, FilterPanel, initialQuery } from "./library";
+import { SearchWorkspace, type SearchResult } from "./SearchWorkspace";
 
 type View = "grid" | "list";
-type SearchResult = { document: Document; hit?: SearchHit };
 type UploadState = {
   active: boolean;
   total: number;
@@ -40,7 +40,7 @@ type UrlState = {
   query: LibraryQuery;
   search: string;
   view: View;
-  selected: { id: number; page: number } | null;
+  selected: { id: number; page: number; highlight?: string; highlightPage?: number } | null;
 };
 
 const SORTS = new Set<DocumentSort>([
@@ -89,6 +89,18 @@ function readUrlState(): UrlState {
   };
 }
 
+function matchesInterpretation(document: Document, interpretation: SearchInterpretation): boolean {
+  if (interpretation.sender && document.sender !== interpretation.sender) return false;
+  const timestamp = Date.parse(document.created_at || document.added_at);
+  const from = interpretation.created_from ? Date.parse(interpretation.created_from) : Number.NaN;
+  const to = interpretation.created_to ? Date.parse(interpretation.created_to) : Number.NaN;
+  return (Number.isNaN(from) || timestamp >= from) && (Number.isNaN(to) || timestamp <= to);
+}
+
+function shortDate(value: string | null | undefined): string {
+  return value?.slice(0, 10) ?? "";
+}
+
 export default function App() {
   const initial = useRef(readUrlState()).current;
   const [query, setQuery] = useState(initial.query);
@@ -98,6 +110,9 @@ export default function App() {
   const [searchText, setSearchText] = useState(initial.search);
   const [activeSearch, setActiveSearch] = useState(initial.search);
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
+  const [searchInterpretation, setSearchInterpretation] = useState<SearchInterpretation | null>(null);
+  const [skipInferredSender, setSkipInferredSender] = useState(false);
+  const [skipInferredDates, setSkipInferredDates] = useState(false);
   const [searchLimited, setSearchLimited] = useState(false);
   const [selected, setSelected] = useState(initial.selected);
   const [view, setView] = useState<View>(initial.view);
@@ -111,7 +126,6 @@ export default function App() {
   const [contextError, setContextError] = useState("");
   const [dataVersion, setDataVersion] = useState(0);
   const [searchVersion, setSearchVersion] = useState(0);
-  const searchRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const uploadingRef = useRef(false);
@@ -167,6 +181,7 @@ export default function App() {
   useEffect(() => {
     if (!searching) {
       setSearchResults(null);
+      setSearchInterpretation(null);
       setSearchLimited(false);
       setSearchError("");
       setSearchLoading(false);
@@ -183,6 +198,8 @@ export default function App() {
         sender: query.sender || null,
         created_from: query.createdFrom ? new Date(`${query.createdFrom}T00:00:00`).toISOString() : null,
         created_to: query.createdTo ? new Date(`${query.createdTo}T23:59:59`).toISOString() : null,
+        skip_inferred_sender: skipInferredSender,
+        skip_inferred_dates: skipInferredDates,
       }),
       listDocuments({ ...query, page: 1, pageSize: 100, metadataQuery: activeSearch }),
     ])
@@ -194,9 +211,13 @@ export default function App() {
           return { document: hit.document, hit };
         });
         for (const document of metadata.items) {
-          if (seen.add(document.document_id)) results.push({ document });
+          if (!seen.has(document.document_id) && matchesInterpretation(document, content.interpretation)) {
+            seen.add(document.document_id);
+            results.push({ document });
+          }
         }
         setSearchResults(results);
+        setSearchInterpretation(content.interpretation);
         setSearchLimited(content.total > content.items.length || metadata.total > metadata.items.length);
       })
       .catch((cause) => {
@@ -208,7 +229,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeSearch, dataVersion, query.createdFrom, query.createdTo, query.sender, query.sort, searchVersion, searching]);
+  }, [activeSearch, dataVersion, query.createdFrom, query.createdTo, query.sender, query.sort, searchVersion, searching, skipInferredDates, skipInferredSender]);
 
   const hasProcessingSearchResults = searchResults?.some(
     ({ document }) => document.status !== "READY" && document.status !== "FAILED",
@@ -251,26 +272,28 @@ export default function App() {
         return;
       }
       const next = readUrlState();
+      const searchChanged = next.search !== activeSearch;
       openedFromUi.current = false;
       detailDirty.current = false;
       setQuery(next.query);
       setSearchText(next.search);
       setActiveSearch(next.search);
-      setSearchResults(null);
+      if (searchChanged) {
+        setSearchResults(null);
+        setSearchInterpretation(null);
+        setSkipInferredSender(false);
+        setSkipInferredDates(false);
+      }
       setView(next.view);
       setSelected(next.selected);
     }
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [selected]);
+  }, [activeSearch, selected]);
 
   const shownDocuments = searching
     ? searchResults?.map((result) => result.document) ?? []
     : library?.items ?? [];
-  const searchHitByDocument = useMemo(
-    () => new Map(searchResults?.flatMap((result) => result.hit ? [[result.document.document_id, result.hit] as const] : []) ?? []),
-    [searchResults],
-  );
   const terms = useMemo(() => activeSearch.split(/\s+/).filter(Boolean), [activeSearch]);
 
   function checkpointHistory() {
@@ -287,6 +310,9 @@ export default function App() {
     if (value !== activeSearch) checkpointHistory();
     else setSearchVersion((version) => version + 1);
     if (value !== activeSearch) setSearchResults(null);
+    setSearchInterpretation(null);
+    setSkipInferredSender(false);
+    setSkipInferredDates(false);
     setActiveSearch(value);
   }
 
@@ -295,6 +321,9 @@ export default function App() {
     setActiveSearch("");
     setSearchText("");
     setSearchResults(null);
+    setSearchInterpretation(null);
+    setSkipInferredSender(false);
+    setSkipInferredDates(false);
     setSearchError("");
   }
 
@@ -354,31 +383,16 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "/" && !selected && !event.metaKey && !event.ctrlKey && !event.altKey) {
-        const target = event.target as HTMLElement;
-        if (target.matches("input, textarea, select") || target.isContentEditable) return;
-        event.preventDefault();
-        searchRef.current?.focus();
-      }
-      if (event.key === "Escape" && !selected && activeSearch) clearSearch();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeSearch, selected]);
-
   function updateQuery(next: LibraryQuery) {
     if (searching) setSearchResults(null);
     setQuery({ ...next, page: 1 });
   }
 
-  function openDocument(document: Document) {
-    const hit = searchHitByDocument.get(document.document_id);
+  function openDocument(document: Document, page = 1, highlight?: string) {
     checkpointHistory();
     openedFromUi.current = true;
     detailDirty.current = false;
-    setSelected({ id: document.document_id, page: hit?.page ?? 1 });
+    setSelected({ id: document.document_id, page, highlight, highlightPage: highlight ? page : undefined });
   }
 
   function closeDocument() {
@@ -401,6 +415,31 @@ export default function App() {
     query.createdTo && { key: "to", label: `To: ${query.createdTo}`, clear: () => updateQuery({ ...query, createdTo: "" }) },
     !searching && query.sort !== initialQuery.sort && { key: "sort", label: "Custom sort", clear: () => updateQuery({ ...query, sort: initialQuery.sort }) },
   ].filter((filter): filter is { key: string; label: string; clear: () => void } => Boolean(filter));
+  const inferredFilters = searching && searchInterpretation ? [
+    !skipInferredSender && searchInterpretation.sender && {
+      key: "inferred-sender",
+      label: `Understood sender: ${searchInterpretation.sender}`,
+      clear: () => setSkipInferredSender(true),
+    },
+    !skipInferredDates && (searchInterpretation.created_from || searchInterpretation.created_to) && {
+      key: "inferred-dates",
+      label: searchInterpretation.created_from && searchInterpretation.created_to
+        ? `Understood dates: ${shortDate(searchInterpretation.created_from)} to ${shortDate(searchInterpretation.created_to)}`
+        : searchInterpretation.created_from
+          ? `Understood from: ${shortDate(searchInterpretation.created_from)}`
+          : `Understood to: ${shortDate(searchInterpretation.created_to)}`,
+      clear: () => setSkipInferredDates(true),
+    },
+  ].filter((filter): filter is { key: string; label: string; clear: () => void } => Boolean(filter)) : [];
+  const shownFilters = [...activeFilters, ...inferredFilters];
+
+  function clearAllFilters() {
+    if (searching) {
+      setSkipInferredSender(true);
+      setSkipInferredDates(true);
+    }
+    updateQuery(initialQuery);
+  }
   const nothingFiled = !searching && activeFilters.length === 0 && library?.total === 0;
 
   const uploadMessage = uploadState?.active
@@ -423,7 +462,6 @@ export default function App() {
         <form className="global-search" onSubmit={runSearch} aria-busy={searchLoading}>
           <button className="search-submit" aria-label="Search"><Search size={18} aria-hidden="true" /></button>
           <input
-            ref={searchRef}
             value={searchText}
             onChange={(event) => setSearchText(event.target.value)}
             placeholder="Search documents"
@@ -432,9 +470,7 @@ export default function App() {
           {searchLoading && <LoaderCircle className="spin search-progress" size={16} aria-label="Searching" />}
           {searching ? (
             <button type="button" className="clear-search" onClick={clearSearch}><X size={15} /> Clear</button>
-          ) : (
-            <kbd className="search-key">/</kbd>
-          )}
+          ) : null}
         </form>
         {health && !(health.ocr_configured && health.embedding_configured) && (
           <div className="health-pill" title={`OCR: ${health.ocr_model}\nEmbeddings: ${health.embedding_model}`}>
@@ -473,16 +509,16 @@ export default function App() {
                 event.target.value = "";
               }}
             />
-            <button className={filtersOpen || activeFilters.length ? "active" : ""} aria-expanded={filtersOpen} aria-controls="document-filters" onClick={() => setFiltersOpen((value) => !value)}><SlidersHorizontal size={16} /> Filters{activeFilters.length > 0 && ` (${activeFilters.length})`}</button>
-            <div className="segmented" aria-label="Document view">
+            <button className={filtersOpen || shownFilters.length ? "active" : ""} aria-expanded={filtersOpen} aria-controls="document-filters" onClick={() => setFiltersOpen((value) => !value)}><SlidersHorizontal size={16} /> Filters{shownFilters.length > 0 && ` (${shownFilters.length})`}</button>
+            {!searching && <div className="segmented" aria-label="Document view">
               <button aria-label="Grid view" aria-pressed={view === "grid"} className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}><Grid2X2 size={16} /></button>
               <button aria-label="List view" aria-pressed={view === "list"} className={view === "list" ? "active" : ""} onClick={() => setView("list")}><List size={17} /></button>
-            </div>
+            </div>}
           </div>
         </section>
 
         {filtersOpen && <FilterPanel query={query} senders={senders} searching={searching} onChange={updateQuery} />}
-        {activeFilters.length > 0 && <div className="active-filters" aria-label="Active filters">{activeFilters.map((filter) => <button key={filter.key} onClick={filter.clear} aria-label={`Clear ${filter.label}`}><span>{filter.label}</span><X size={13} aria-hidden="true" /></button>)}<button className="clear-all-filters" onClick={() => updateQuery(initialQuery)}>Clear all</button></div>}
+        {shownFilters.length > 0 && <div className="active-filters" aria-label="Active filters">{shownFilters.map((filter) => <button key={filter.key} onClick={filter.clear} aria-label={`Remove ${filter.label}`}><span>{filter.label}</span><X size={13} aria-hidden="true" /></button>)}<button className="clear-all-filters" onClick={clearAllFilters}>Clear all</button></div>}
 
         {initialLoading && !library ? (
           <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Loading your documents</p></div>
@@ -506,16 +542,17 @@ export default function App() {
             <FileSearch size={36} aria-hidden="true" />
             <h3>No matches</h3>
             <p>Try different words or remove a filter to search more of the library.</p>
-            <div className="empty-actions">{searching && <button onClick={clearSearch}>Clear search</button>}{activeFilters.length > 0 && <button onClick={() => updateQuery(initialQuery)}>Clear filters</button>}</div>
+            <div className="empty-actions">{searching && <button onClick={clearSearch}>Clear search</button>}{shownFilters.length > 0 && <button onClick={clearAllFilters}>Clear filters</button>}</div>
           </div>
+        ) : searching && searchResults ? (
+          <SearchWorkspace key={activeSearch} query={activeSearch} results={searchResults} terms={terms} loading={searchLoading} onOpen={openDocument} />
         ) : (
           <div className={`document-collection ${view}`} aria-busy={searchLoading}>
             {shownDocuments.map((document) => (
               <DocumentCard
                 key={document.document_id}
                 document={document}
-                hit={searchHitByDocument.get(document.document_id)}
-                terms={searching ? terms : []}
+                terms={[]}
                 onOpen={() => openDocument(document)}
                 onFilterSender={filterBySender}
               />
@@ -534,7 +571,7 @@ export default function App() {
 
       {dropping && <div className="drop-overlay" aria-hidden="true"><p><strong>{uploading ? "Upload in progress" : "Drop to upload"}</strong></p></div>}
 
-      {selected && <DocumentDetail documentId={selected.id} initialPage={selected.page} senders={senders} onPageChange={(page) => setSelected((value) => value ? { ...value, page } : value)} onDirtyChange={(dirty) => { detailDirty.current = dirty; }} onClose={closeDocument} onChanged={() => setDataVersion((version) => version + 1)} />}
+      {selected && <DocumentDetail documentId={selected.id} initialPage={selected.page} highlight={selected.highlight} highlightPage={selected.highlightPage} senders={senders} onPageChange={(page) => setSelected((value) => value ? { ...value, page } : value)} onDirtyChange={(dirty) => { detailDirty.current = dirty; }} onClose={closeDocument} onChanged={() => setDataVersion((version) => version + 1)} />}
     </div>
   );
 }

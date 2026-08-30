@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { PageInfo } from "./api";
+import { matchesEvidence } from "./evidenceHighlight";
 import { fitFontSize } from "./OcrTextLayer";
 
 /** Labels whose payload is a graphic; rendered as crops of the page image. */
@@ -165,7 +166,7 @@ const SHRINK_LIMIT = 24;
  * box, where `overflow: hidden` would swallow it. So the rendered height is
  * measured and the font stepped down until the content is inside its box.
  */
-function TextBlock({ block, fontSize }: { block: ReplicaBlock; fontSize: number }) {
+function TextBlock({ block, fontSize, highlight }: { block: ReplicaBlock; fontSize: number; highlight?: string }) {
   const ref = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -192,7 +193,7 @@ function TextBlock({ block, fontSize }: { block: ReplicaBlock; fontSize: number 
   return (
     <div
       ref={ref}
-      className={`digital-block digital-block--${block.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+      className={`digital-block digital-block--${block.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}${matchesEvidence(block.text, highlight) ? " evidence-match" : ""}`}
       data-label={block.label}
       style={{ ...blockStyle(block.bbox), fontSize: `${fontSize.toFixed(2)}px` }}
     >
@@ -234,7 +235,7 @@ function FigureCrop({ block, imageUrl }: { block: ReplicaBlock; imageUrl: string
  * for pages OCR'd before HTML was stored, and to plain text before layout data
  * exists at all.
  */
-export function DigitalPage({ documentId, page }: { documentId: number; page: PageInfo | undefined }) {
+export function DigitalPage({ documentId, page, highlight }: { documentId: number; page: PageInfo | undefined; highlight?: string }) {
   const sheetRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState<{ width: number; height: number } | null>(null);
   const [aspect, setAspect] = useState<{ width: number; height: number } | null>(null);
@@ -282,7 +283,7 @@ export function DigitalPage({ documentId, page }: { documentId: number; page: Pa
   }, [blocks.length]);
 
   if (!page || blocks.length === 0) {
-    return <article className="ocr-text">{page?.text || "Text is not ready for this page."}</article>;
+    return <article className={`ocr-text${matchesEvidence(page?.text ?? "", highlight) ? " evidence-match" : ""}`}>{page?.text || "Text is not ready for this page."}</article>;
   }
 
   return (
@@ -301,6 +302,7 @@ export function DigitalPage({ documentId, page }: { documentId: number; page: Pa
               key={`${block.bbox.join("-")}-${index}`}
               block={block}
               fontSize={fitFontSize(block.text, block.bbox, box.width, box.height)}
+              highlight={highlight}
             />
           ),
         )}
