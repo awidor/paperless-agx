@@ -680,7 +680,7 @@ fn inferred_date_range(
 ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let month_year = words
         .windows(2)
-        .filter_map(|pair| Some((parse_year(&pair[1])?, month_number(&pair[0])?)))
+        .filter_map(|pair| Some((parse_year(&pair[1], now.year())?, month_number(&pair[0])?)))
         .filter_map(|(year, month)| month_range(year, month))
         .collect::<Vec<_>>();
     if !month_year.is_empty() {
@@ -723,7 +723,7 @@ fn inferred_date_range(
 
     let years = words
         .iter()
-        .filter_map(|word| parse_year(word))
+        .filter_map(|word| parse_year(word, now.year()))
         .filter_map(year_range)
         .collect::<Vec<_>>();
     unique_range(years)
@@ -739,11 +739,11 @@ fn unique_range(
         .then_some(first)
 }
 
-fn parse_year(word: &str) -> Option<i32> {
+fn parse_year(word: &str, current_year: i32) -> Option<i32> {
     (word.len() == 4 && word.bytes().all(|byte| byte.is_ascii_digit()))
         .then(|| word.parse().ok())
         .flatten()
-        .filter(|year| (1000..=9999).contains(year))
+        .filter(|year| (1900..=current_year + 1).contains(year))
 }
 
 fn is_this(word: &str) -> bool {
@@ -1004,5 +1004,9 @@ mod tests {
                 "{query}"
             );
         }
+        assert_eq!(
+            infer_search_interpretation(&request("reference 7319"), &[], now).created_from,
+            None
+        );
     }
 }
