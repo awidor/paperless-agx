@@ -5,9 +5,15 @@
     "/api/health": {"get": {"operationId": "health", "responses": {"200": {"description": "Health", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HealthResponse"}}}}}}},
     "/api/documents": {
       "get": {"operationId": "listDocuments", "parameters": [
-        {"name": "sender", "in": "query", "schema": {"type": ["string", "null"]}}
+        {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1}},
+        {"name": "page_size", "in": "query", "schema": {"type": "integer", "default": 24}},
+        {"name": "query", "in": "query", "schema": {"type": ["string", "null"]}},
+        {"name": "sender", "in": "query", "schema": {"type": ["string", "null"]}},
+        {"name": "created_from", "in": "query", "schema": {"type": ["string", "null"], "format": "date-time"}},
+        {"name": "created_to", "in": "query", "schema": {"type": ["string", "null"], "format": "date-time"}},
+        {"name": "sort", "in": "query", "schema": {"$ref": "#/components/schemas/DocumentSort"}}
       ], "responses": {"200": {"description": "Documents", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DocumentPageResult"}}}}}},
-      "post": {"operationId": "uploadDocument", "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {"type": "object", "required": ["file"], "properties": {"file": {"type": "string", "format": "binary"}, "title": {"type": "string"}, "created_at": {"type": "string", "format": "date-time"}}}}}}, "responses": {"201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Document"}}}}}}
+      "post": {"operationId": "uploadDocument", "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {"type": "object", "required": ["file"], "properties": {"file": {"type": "string", "format": "binary"}, "title": {"type": "string"}, "created_at": {"type": "string", "format": "date-time"}}}}}}, "responses": {"200": {"description": "Existing document", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Document"}}}}, "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Document"}}}}}}
     },
     "/api/documents/{id}": {
       "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer", "format": "uint64"}}],

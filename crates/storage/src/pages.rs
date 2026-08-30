@@ -294,7 +294,10 @@ mod tests {
                 bbox: [10, 20, 900, 120],
                 text: "replacement".into(),
             }],
-            html: Some("<div data-label=\"Text\" data-bbox=\"10 20 900 120\"><p>replacement</p></div>".into()),
+            html: Some(
+                "<div data-label=\"Text\" data-bbox=\"10 20 900 120\"><p>replacement</p></div>"
+                    .into(),
+            ),
             updated_at: Utc::now(),
         }];
         repository

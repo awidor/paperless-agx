@@ -17,97 +17,308 @@ import {
   uploadDocument,
   type Document,
   type DocumentPageResult,
+  type DocumentSort,
   type HealthResponse,
+  type LibraryQuery,
   type SearchHit,
 } from "./api";
 import { DocumentDetail } from "./DocumentDetail";
 import { DocumentCard, FilterPanel, initialQuery } from "./library";
 
+type View = "grid" | "list";
+type SearchResult = { document: Document; hit?: SearchHit };
+type UploadState = {
+  active: boolean;
+  total: number;
+  completed: number;
+  current: string;
+  uploaded: number;
+  duplicates: number;
+  failures: string[];
+};
+type UrlState = {
+  query: LibraryQuery;
+  search: string;
+  view: View;
+  selected: { id: number; page: number } | null;
+};
+
+const SORTS = new Set<DocumentSort>([
+  "document_date_desc",
+  "document_date_asc",
+  "added_date_desc",
+  "added_date_asc",
+  "title_asc",
+  "title_desc",
+  "sender_asc",
+  "sender_desc",
+  "file_size_asc",
+  "file_size_desc",
+]);
+
+function positiveInteger(value: string | null, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function dateValue(value: string | null): string {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return "";
+  const date = new Date(`${value}T00:00:00`);
+  const [year, month, day] = value.split("-").map(Number);
+  return date.getFullYear() === year && date.getMonth() + 1 === month && date.getDate() === day ? value : "";
+}
+
+function readUrlState(): UrlState {
+  const params = new URLSearchParams(window.location.search);
+  const sort = params.get("sort") as DocumentSort | null;
+  const documentId = positiveInteger(params.get("document"), 0);
+  return {
+    query: {
+      ...initialQuery,
+      page: positiveInteger(params.get("page"), 1),
+      sender: params.get("sender") || "",
+      createdFrom: dateValue(params.get("from")),
+      createdTo: dateValue(params.get("to")),
+      sort: sort && SORTS.has(sort) ? sort : initialQuery.sort,
+    },
+    search: params.get("q")?.trim() || "",
+    view: params.get("view") === "list" ? "list" : "grid",
+    selected: documentId
+      ? { id: documentId, page: positiveInteger(params.get("document_page"), 1) }
+      : null,
+  };
+}
+
 export default function App() {
-  const [query, setQuery] = useState(initialQuery);
+  const initial = useRef(readUrlState()).current;
+  const [query, setQuery] = useState(initial.query);
   const [library, setLibrary] = useState<DocumentPageResult | null>(null);
   const [senders, setSenders] = useState<string[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [searchText, setSearchText] = useState("");
-  const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null);
-  const [selected, setSelected] = useState<{ id: number; page: number } | null>(null);
-  const [view, setView] = useState<"grid" | "list">("grid");
+  const [searchText, setSearchText] = useState(initial.search);
+  const [activeSearch, setActiveSearch] = useState(initial.search);
+  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
+  const [searchLimited, setSearchLimited] = useState(false);
+  const [selected, setSelected] = useState(initial.selected);
+  const [view, setView] = useState<View>(initial.view);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [dropping, setDropping] = useState(false);
-  const [error, setError] = useState("");
+  const [uploadState, setUploadState] = useState<UploadState | null>(null);
+  const [libraryError, setLibraryError] = useState("");
+  const [searchError, setSearchError] = useState("");
+  const [contextError, setContextError] = useState("");
+  const [dataVersion, setDataVersion] = useState(0);
+  const [searchVersion, setSearchVersion] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
+  const uploadingRef = useRef(false);
+  const openedFromUi = useRef(false);
+  const detailDirty = useRef(false);
+  const restoringHistory = useRef(false);
   const uploadRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
 
-  const refresh = useCallback(async () => {
+  const searching = activeSearch.length > 0;
+  const uploading = uploadState?.active ?? false;
+  const error = searchError || libraryError || contextError;
+
+  const refreshLibrary = useCallback(async () => {
     try {
-      const result = await listDocuments(query);
-      setLibrary(result);
-      setError("");
+      setLibrary(await listDocuments(query));
+      setLibraryError("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The document library failed to load.");
+      setLibraryError(cause instanceof Error ? cause.message : "The document library failed to load.");
     } finally {
-      setLoading(false);
+      setInitialLoading(false);
     }
-    void Promise.all([getSenders(), getHealth()])
-      .then(([nextSenders, nextHealth]) => {
-        setSenders(nextSenders);
-        setHealth(nextHealth);
-      })
-      .catch((cause) => setError(cause instanceof Error ? cause.message : "Health data failed to load."));
   }, [query]);
 
+  const refreshContext = useCallback(async () => {
+    try {
+      const [nextSenders, nextHealth] = await Promise.all([getSenders(), getHealth()]);
+      setSenders(nextSenders);
+      setHealth(nextHealth);
+      setContextError("");
+    } catch (cause) {
+      setContextError(cause instanceof Error ? cause.message : "Service status failed to load.");
+    }
+  }, []);
+
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 2_000);
+    void refreshLibrary();
+  }, [refreshLibrary, dataVersion]);
+
+  useEffect(() => {
+    void refreshContext();
+  }, [refreshContext, dataVersion]);
+
+  const hasProcessingDocuments = library?.items.some(
+    (document) => document.status !== "READY" && document.status !== "FAILED",
+  ) ?? false;
+
+  useEffect(() => {
+    if (!hasProcessingDocuments) return;
+    const timer = window.setInterval(() => void refreshLibrary(), 2_000);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [hasProcessingDocuments, refreshLibrary]);
 
-
-
-  const shownDocuments = searchHits?.map((hit) => hit.document) ?? library?.items ?? [];
-  const terms = useMemo(() => searchText.trim().split(/\s+/).filter(Boolean), [searchText]);
-
-  async function runSearch(event: React.FormEvent) {
-    event.preventDefault();
-    const value = searchText.trim();
-    if (!value) {
-      setSearchHits(null);
+  useEffect(() => {
+    if (!searching) {
+      setSearchResults(null);
+      setSearchLimited(false);
+      setSearchError("");
+      setSearchLoading(false);
       return;
     }
-    setLoading(true);
-    try {
-      const result = await searchDocuments({
-        query: value,
+    let cancelled = false;
+    setSearchLoading(true);
+    setSearchError("");
+    void Promise.all([
+      searchDocuments({
+        query: activeSearch,
         page: 1,
         page_size: 100,
         sender: query.sender || null,
         created_from: query.createdFrom ? new Date(`${query.createdFrom}T00:00:00`).toISOString() : null,
         created_to: query.createdTo ? new Date(`${query.createdTo}T23:59:59`).toISOString() : null,
+      }),
+      listDocuments({ ...query, page: 1, pageSize: 100, metadataQuery: activeSearch }),
+    ])
+      .then(([content, metadata]) => {
+        if (cancelled) return;
+        const seen = new Set<number>();
+        const results: SearchResult[] = content.items.map((hit) => {
+          seen.add(hit.document.document_id);
+          return { document: hit.document, hit };
+        });
+        for (const document of metadata.items) {
+          if (seen.add(document.document_id)) results.push({ document });
+        }
+        setSearchResults(results);
+        setSearchLimited(content.total > content.items.length || metadata.total > metadata.items.length);
+      })
+      .catch((cause) => {
+        if (!cancelled) setSearchError(cause instanceof Error ? cause.message : "Search failed.");
+      })
+      .finally(() => {
+        if (!cancelled) setSearchLoading(false);
       });
-      setSearchHits(result.items);
-      setError("");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Search failed.");
-    } finally {
-      setLoading(false);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSearch, dataVersion, query.createdFrom, query.createdTo, query.sender, query.sort, searchVersion, searching]);
+
+  const hasProcessingSearchResults = searchResults?.some(
+    ({ document }) => document.status !== "READY" && document.status !== "FAILED",
+  ) ?? false;
+
+  useEffect(() => {
+    if (!hasProcessingSearchResults) return;
+    const timer = window.setInterval(() => setSearchVersion((version) => version + 1), 2_000);
+    return () => window.clearInterval(timer);
+  }, [hasProcessingSearchResults]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    for (const key of ["q", "page", "sender", "from", "to", "sort", "view", "document", "document_page"]) {
+      url.searchParams.delete(key);
     }
+    if (activeSearch) url.searchParams.set("q", activeSearch);
+    if (query.page > 1) url.searchParams.set("page", String(query.page));
+    if (query.sender) url.searchParams.set("sender", query.sender);
+    if (query.createdFrom) url.searchParams.set("from", query.createdFrom);
+    if (query.createdTo) url.searchParams.set("to", query.createdTo);
+    if (query.sort !== initialQuery.sort) url.searchParams.set("sort", query.sort);
+    if (view !== "grid") url.searchParams.set("view", view);
+    if (selected) {
+      url.searchParams.set("document", String(selected.id));
+      if (selected.page > 1) url.searchParams.set("document_page", String(selected.page));
+    }
+    window.history.replaceState(null, "", url);
+  }, [activeSearch, query, selected, view]);
+
+  useEffect(() => {
+    function onPopState() {
+      if (restoringHistory.current) {
+        restoringHistory.current = false;
+        return;
+      }
+      if (selected && detailDirty.current && !window.confirm("Discard your unsaved document changes?")) {
+        restoringHistory.current = true;
+        window.history.forward();
+        return;
+      }
+      const next = readUrlState();
+      openedFromUi.current = false;
+      detailDirty.current = false;
+      setQuery(next.query);
+      setSearchText(next.search);
+      setActiveSearch(next.search);
+      setSearchResults(null);
+      setView(next.view);
+      setSelected(next.selected);
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [selected]);
+
+  const shownDocuments = searching
+    ? searchResults?.map((result) => result.document) ?? []
+    : library?.items ?? [];
+  const searchHitByDocument = useMemo(
+    () => new Map(searchResults?.flatMap((result) => result.hit ? [[result.document.document_id, result.hit] as const] : []) ?? []),
+    [searchResults],
+  );
+  const terms = useMemo(() => activeSearch.split(/\s+/).filter(Boolean), [activeSearch]);
+
+  function checkpointHistory() {
+    window.history.pushState(null, "", window.location.href);
+  }
+
+  function runSearch(event: React.FormEvent) {
+    event.preventDefault();
+    const value = searchText.trim();
+    if (!value) {
+      clearSearch();
+      return;
+    }
+    if (value !== activeSearch) checkpointHistory();
+    else setSearchVersion((version) => version + 1);
+    if (value !== activeSearch) setSearchResults(null);
+    setActiveSearch(value);
+  }
+
+  function clearSearch() {
+    if (activeSearch) checkpointHistory();
+    setActiveSearch("");
+    setSearchText("");
+    setSearchResults(null);
+    setSearchError("");
   }
 
   async function upload(files: FileList | File[]) {
+    const pending = Array.from(files);
+    if (pending.length === 0 || uploadingRef.current) return;
+    uploadingRef.current = true;
     const failures: string[] = [];
-    for (const file of Array.from(files)) {
+    let uploaded = 0;
+    let duplicates = 0;
+    setUploadState({ active: true, total: pending.length, completed: 0, current: pending[0].name, uploaded, duplicates, failures });
+    for (const [index, file] of pending.entries()) {
+      setUploadState({ active: true, total: pending.length, completed: index, current: file.name, uploaded, duplicates, failures: [...failures] });
       try {
-        await uploadDocument(file);
+        const result = await uploadDocument(file);
+        if (result.duplicate) duplicates += 1;
+        else uploaded += 1;
       } catch (cause) {
-        const message = cause instanceof Error ? cause.message : "upload failed";
-        failures.push(`${file.name} — ${message}`);
+        failures.push(`${file.name} — ${cause instanceof Error ? cause.message : "upload failed"}`);
       }
     }
-    if (failures.length > 0) setError(`Upload failed — ${failures.join("; ")}`);
-    await refresh();
+    uploadingRef.current = false;
+    setUploadState({ active: false, total: pending.length, completed: pending.length, current: "", uploaded, duplicates, failures });
+    setDataVersion((version) => version + 1);
   }
   uploadRef.current = upload;
 
@@ -129,7 +340,7 @@ export default function App() {
       event.preventDefault();
       dragDepth.current = 0;
       setDropping(false);
-      if (event.dataTransfer?.files.length) void uploadRef.current?.(event.dataTransfer.files);
+      if (event.dataTransfer?.files.length) void uploadRef.current(event.dataTransfer.files);
     }
     window.addEventListener("dragenter", onDragEnter);
     window.addEventListener("dragleave", onDragLeave);
@@ -145,37 +356,62 @@ export default function App() {
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (event.key === "/" && !selected && !event.metaKey && !event.ctrlKey && !event.altKey) {
         const target = event.target as HTMLElement;
         if (target.matches("input, textarea, select") || target.isContentEditable) return;
         event.preventDefault();
         searchRef.current?.focus();
       }
-      if (event.key === "Escape") {
-        if (selected) setSelected(null);
-        else if (searchHits) clearSearch();
-      }
+      if (event.key === "Escape" && !selected && activeSearch) clearSearch();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selected, searchHits]);
+  }, [activeSearch, selected]);
 
-  function clearSearch() {
-    setSearchHits(null);
-    setSearchText("");
+  function updateQuery(next: LibraryQuery) {
+    if (searching) setSearchResults(null);
+    setQuery({ ...next, page: 1 });
   }
 
   function openDocument(document: Document) {
-    const hit = searchHits?.find((candidate) => candidate.document.document_id === document.document_id);
+    const hit = searchHitByDocument.get(document.document_id);
+    checkpointHistory();
+    openedFromUi.current = true;
+    detailDirty.current = false;
     setSelected({ id: document.document_id, page: hit?.page ?? 1 });
   }
 
-  function filterBySender(sender: string) {
-    setQuery((value) => ({ ...value, sender, page: 1 }));
-    setSearchHits(null);
+  function closeDocument() {
+    if (openedFromUi.current) {
+      openedFromUi.current = false;
+      window.history.back();
+    } else {
+      setSelected(null);
+    }
   }
 
-  const nothingFiled = !searchHits && library?.total === 0;
+  function filterBySender(sender: string) {
+    if (searching) setSearchResults(null);
+    setQuery((value) => ({ ...value, sender, page: 1 }));
+  }
+
+  const activeFilters = [
+    query.sender && { key: "sender", label: `Sender: ${query.sender}`, clear: () => updateQuery({ ...query, sender: "" }) },
+    query.createdFrom && { key: "from", label: `From: ${query.createdFrom}`, clear: () => updateQuery({ ...query, createdFrom: "" }) },
+    query.createdTo && { key: "to", label: `To: ${query.createdTo}`, clear: () => updateQuery({ ...query, createdTo: "" }) },
+    !searching && query.sort !== initialQuery.sort && { key: "sort", label: "Custom sort", clear: () => updateQuery({ ...query, sort: initialQuery.sort }) },
+  ].filter((filter): filter is { key: string; label: string; clear: () => void } => Boolean(filter));
+  const nothingFiled = !searching && activeFilters.length === 0 && library?.total === 0;
+
+  const uploadMessage = uploadState?.active
+    ? `Uploading ${uploadState.completed + 1} of ${uploadState.total}: ${uploadState.current}`
+    : uploadState
+      ? [
+          uploadState.uploaded > 0 && `${uploadState.uploaded} uploaded`,
+          uploadState.duplicates > 0 && `${uploadState.duplicates} already in the library`,
+          uploadState.failures.length > 0 && uploadState.failures.join(" · "),
+        ].filter(Boolean).join(" · ")
+      : "";
 
   return (
     <div className="app-shell">
@@ -184,8 +420,8 @@ export default function App() {
           <span className="brand-name">Paperless</span>
           <span className="brand-agx">AGX</span>
         </div>
-        <form className="global-search" onSubmit={runSearch}>
-          <Search size={18} aria-hidden="true" />
+        <form className="global-search" onSubmit={runSearch} aria-busy={searchLoading}>
+          <button className="search-submit" aria-label="Search"><Search size={18} aria-hidden="true" /></button>
           <input
             ref={searchRef}
             value={searchText}
@@ -193,7 +429,8 @@ export default function App() {
             placeholder="Search documents"
             aria-label="Search documents"
           />
-          {searchHits ? (
+          {searchLoading && <LoaderCircle className="spin search-progress" size={16} aria-label="Searching" />}
+          {searching ? (
             <button type="button" className="clear-search" onClick={clearSearch}><X size={15} /> Clear</button>
           ) : (
             <kbd className="search-key">/</kbd>
@@ -208,67 +445,77 @@ export default function App() {
       </header>
 
       <main>
-        {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")} aria-label="Dismiss error"><X size={16} /></button></div>}
+        {error && <div className="error-banner" role="alert">{error}<button onClick={() => { setSearchError(""); setLibraryError(""); setContextError(""); }} aria-label="Dismiss error"><X size={16} /></button></div>}
+        {uploadState && <div className={`upload-banner${uploadState.failures.length ? " has-errors" : ""}`} role={uploadState.failures.length && !uploadState.active ? "alert" : "status"}><span>{uploadMessage}</span>{!uploadState.active && <button onClick={() => setUploadState(null)} aria-label="Dismiss upload status"><X size={16} /></button>}</div>}
 
         <section className="library-toolbar">
           <div>
-            <h2>{searchHits ? "Search results" : "Library"}</h2>
-            <span className="toolbar-count">
-              {searchHits
-                ? <>“{searchText.trim()}” · {searchHits.length} {searchHits.length === 1 ? "document" : "documents"}</>
+            <h2>{searching ? "Search results" : "Library"}</h2>
+            <span className="toolbar-count" aria-live="polite">
+              {searching
+                ? searchLoading && searchResults === null
+                  ? "Searching"
+                  : <>“{activeSearch}” · {searchResults?.length ?? 0}{searchLimited ? "+" : ""} {(searchResults?.length ?? 0) === 1 ? "document" : "documents"}</>
                 : library && <>{library.total} {library.total === 1 ? "document" : "documents"}</>}
             </span>
           </div>
           <div className="toolbar-actions">
-            <button className="upload-button" onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Upload</button>
+            <button className="upload-button" disabled={uploading} onClick={() => fileInputRef.current?.click()}><Upload size={16} /> {uploading ? "Uploading" : "Upload"}</button>
             <input
               ref={fileInputRef}
               type="file"
               multiple
               hidden
+              disabled={uploading}
               accept="application/pdf,image/png,image/jpeg,image/tiff,image/webp"
               onChange={(event) => {
                 if (event.target.files) void upload(event.target.files);
                 event.target.value = "";
               }}
             />
-            <button className={filtersOpen ? "active" : ""} onClick={() => setFiltersOpen((value) => !value)}><SlidersHorizontal size={16} /> Filters</button>
-            <div className="segmented">
-              <button aria-label="Grid view" className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}><Grid2X2 size={16} /></button>
-              <button aria-label="List view" className={view === "list" ? "active" : ""} onClick={() => setView("list")}><List size={17} /></button>
+            <button className={filtersOpen || activeFilters.length ? "active" : ""} aria-expanded={filtersOpen} aria-controls="document-filters" onClick={() => setFiltersOpen((value) => !value)}><SlidersHorizontal size={16} /> Filters{activeFilters.length > 0 && ` (${activeFilters.length})`}</button>
+            <div className="segmented" aria-label="Document view">
+              <button aria-label="Grid view" aria-pressed={view === "grid"} className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}><Grid2X2 size={16} /></button>
+              <button aria-label="List view" aria-pressed={view === "list"} className={view === "list" ? "active" : ""} onClick={() => setView("list")}><List size={17} /></button>
             </div>
           </div>
         </section>
 
-        {filtersOpen && <FilterPanel query={query} senders={senders} onChange={(next) => { setQuery({ ...next, page: 1 }); setSearchHits(null); }} />}
-        {loading && !library ? (
+        {filtersOpen && <FilterPanel query={query} senders={senders} searching={searching} onChange={updateQuery} />}
+        {activeFilters.length > 0 && <div className="active-filters" aria-label="Active filters">{activeFilters.map((filter) => <button key={filter.key} onClick={filter.clear} aria-label={`Clear ${filter.label}`}><span>{filter.label}</span><X size={13} aria-hidden="true" /></button>)}<button className="clear-all-filters" onClick={() => updateQuery(initialQuery)}>Clear all</button></div>}
+
+        {initialLoading && !library ? (
           <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Loading your documents</p></div>
         ) : !library ? (
           <div className="empty-state">
             <h3>The library could not be loaded</h3>
             <p>Check that the Paperless AGX server is running, then try again.</p>
-            <button onClick={() => void refresh()}>Try again</button>
+            <button onClick={() => void refreshLibrary()}>Try again</button>
           </div>
+        ) : searching && searchLoading && searchResults === null ? (
+          <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Searching your documents</p></div>
         ) : nothingFiled ? (
           <div className="empty-state">
             <FileSearch size={36} aria-hidden="true" />
             <h3>No documents yet</h3>
-            <p>Drop files anywhere on this page, or use the Upload button. PDF, PNG, JPEG, TIFF and WebP are processed on this machine.</p>
+            <p>Drop files anywhere on this page, or choose files to begin. PDF, PNG, JPEG, TIFF and WebP are processed on this machine.</p>
+            <button onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Upload documents</button>
           </div>
         ) : shownDocuments.length === 0 ? (
           <div className="empty-state">
             <FileSearch size={36} aria-hidden="true" />
             <h3>No matches</h3>
-            <p>Try different words, or clear the filters to search the whole library.</p>
+            <p>Try different words or remove a filter to search more of the library.</p>
+            <div className="empty-actions">{searching && <button onClick={clearSearch}>Clear search</button>}{activeFilters.length > 0 && <button onClick={() => updateQuery(initialQuery)}>Clear filters</button>}</div>
           </div>
         ) : (
-          <div className={`document-collection ${view}`}>
+          <div className={`document-collection ${view}`} aria-busy={searchLoading}>
             {shownDocuments.map((document) => (
               <DocumentCard
                 key={document.document_id}
                 document={document}
-                hit={searchHits?.find((item) => item.document.document_id === document.document_id)}
-                terms={searchHits ? terms : []}
+                hit={searchHitByDocument.get(document.document_id)}
+                terms={searching ? terms : []}
                 onOpen={() => openDocument(document)}
                 onFilterSender={filterBySender}
               />
@@ -276,7 +523,7 @@ export default function App() {
           </div>
         )}
 
-        {!searchHits && library && library.total > query.pageSize && (
+        {!searching && library && library.total > query.pageSize && (
           <nav className="pagination" aria-label="Document pages">
             <button disabled={query.page === 1} onClick={() => setQuery((value) => ({ ...value, page: value.page - 1 }))}>Previous</button>
             <span>Page {query.page} of {Math.ceil(library.total / query.pageSize)}</span>
@@ -285,10 +532,9 @@ export default function App() {
         )}
       </main>
 
-      {dropping && <div className="drop-overlay" aria-hidden="true"><p><strong>Drop to upload</strong></p></div>}
+      {dropping && <div className="drop-overlay" aria-hidden="true"><p><strong>{uploading ? "Upload in progress" : "Drop to upload"}</strong></p></div>}
 
-      {selected && <DocumentDetail documentId={selected.id} initialPage={selected.page} senders={senders} onClose={() => setSelected(null)} onChanged={() => { void refresh(); }} />}
+      {selected && <DocumentDetail documentId={selected.id} initialPage={selected.page} senders={senders} onPageChange={(page) => setSelected((value) => value ? { ...value, page } : value)} onDirtyChange={(dirty) => { detailDirty.current = dirty; }} onClose={closeDocument} onChanged={() => setDataVersion((version) => version + 1)} />}
     </div>
   );
 }
-

@@ -326,7 +326,13 @@ export interface operations {
     listDocuments: {
         parameters: {
             query?: {
+                page?: number;
+                page_size?: number;
+                query?: string | null;
                 sender?: string | null;
+                created_from?: string | null;
+                created_to?: string | null;
+                sort?: components["schemas"]["DocumentSort"];
             };
             header?: never;
             path?: never;
@@ -364,6 +370,15 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Existing document */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
             /** @description Created */
             201: {
                 headers: {

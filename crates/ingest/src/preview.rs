@@ -101,8 +101,8 @@ impl PreviewService {
         let image = match document.media_type {
             MediaType::Image => load_image(source).await?,
             MediaType::Pdf => {
-                let rendered = render_pdf_page(&self.layout, &source, page, Some(OCR_DPI), None)
-                    .await?;
+                let rendered =
+                    render_pdf_page(&self.layout, &source, page, Some(OCR_DPI), None).await?;
                 let image = load_image(rendered.clone()).await?;
                 tokio::fs::remove_file(rendered)
                     .await

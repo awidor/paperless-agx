@@ -220,6 +220,7 @@ pub enum DocumentSort {
 pub struct DocumentQuery {
     pub page: u32,
     pub page_size: u32,
+    pub query: Option<String>,
     pub sender: Option<String>,
     pub created_from: Option<DateTime<Utc>>,
     pub created_to: Option<DateTime<Utc>>,
@@ -231,6 +232,7 @@ impl Default for DocumentQuery {
         Self {
             page: 1,
             page_size: 24,
+            query: None,
             sender: None,
             created_from: None,
             created_to: None,

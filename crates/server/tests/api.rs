@@ -362,6 +362,35 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
     assert_eq!(listing["total"], 1);
     assert_eq!(listing["items"][0]["sender"], "Acme Corp");
 
+    for query in ["edited", "acme", "scan.png"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/documents?page=1&page_size=10&query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let result: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(result["total"], 1, "metadata query {query}");
+    }
+
+    let no_match = app
+        .clone()
+        .oneshot(
+            Request::get("/api/documents?page=1&page_size=10&query=missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let no_match: serde_json::Value =
+        serde_json::from_slice(&no_match.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(no_match["total"], 0);
+
     let senders = app
         .clone()
         .oneshot(Request::get("/api/senders").body(Body::empty()).unwrap())

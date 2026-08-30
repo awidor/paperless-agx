@@ -157,9 +157,13 @@ pub async fn list_documents(
         .into_iter()
         .filter(|document| {
             query
-                .sender
-                .as_ref()
-                .is_none_or(|value| document.sender.as_ref() == Some(value))
+                .query
+                .as_deref()
+                .is_none_or(|value| metadata_matches(document, value))
+                && query
+                    .sender
+                    .as_ref()
+                    .is_none_or(|value| document.sender.as_ref() == Some(value))
                 && query
                     .created_from
                     .is_none_or(|date| document.created_at.is_some_and(|value| value >= date))
@@ -478,6 +482,24 @@ fn sort_documents(documents: &mut [Document], sort: DocumentSort) {
             .cmp(&left.file_size)
             .then_with(|| right.document_id.cmp(&left.document_id)),
     });
+}
+
+fn metadata_matches(document: &Document, query: &str) -> bool {
+    let terms = query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    terms.is_empty()
+        || terms.iter().all(|term| {
+            [
+                Some(document.filename.as_str()),
+                document.title.as_deref(),
+                document.sender.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| value.to_lowercase().contains(term))
+        })
 }
 
 fn search_filter(request: &SearchRequest) -> Option<String> {

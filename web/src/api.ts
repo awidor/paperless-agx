@@ -11,14 +11,17 @@ export type SearchHit = components["schemas"]["SearchHit"];
 export type SearchRequest = components["schemas"]["SearchRequest"];
 export type SearchResponse = components["schemas"]["SearchResponse"];
 
-async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, init);
+async function responseBody<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(payload.error || `Request failed with ${response.status}`);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  return responseBody(await fetch(input, init));
 }
 
 export type LibraryQuery = {
@@ -28,6 +31,7 @@ export type LibraryQuery = {
   createdFrom: string;
   createdTo: string;
   sort: DocumentSort;
+  metadataQuery?: string;
 };
 
 export function listDocuments(query: LibraryQuery): Promise<DocumentPageResult> {
@@ -39,13 +43,15 @@ export function listDocuments(query: LibraryQuery): Promise<DocumentPageResult> 
   if (query.sender) params.set("sender", query.sender);
   if (query.createdFrom) params.set("created_from", new Date(`${query.createdFrom}T00:00:00`).toISOString());
   if (query.createdTo) params.set("created_to", new Date(`${query.createdTo}T23:59:59`).toISOString());
+  if (query.metadataQuery) params.set("query", query.metadataQuery);
   return request(`/api/documents?${params}`);
 }
 
-export function uploadDocument(file: File): Promise<Document> {
+export async function uploadDocument(file: File): Promise<{ document: Document; duplicate: boolean }> {
   const body = new FormData();
   body.set("file", file);
-  return request("/api/documents", { method: "POST", body });
+  const response = await fetch("/api/documents", { method: "POST", body });
+  return { document: await responseBody<Document>(response), duplicate: response.status === 200 };
 }
 
 export function getDocument(id: number): Promise<Document> {
