@@ -16,19 +16,23 @@ RUN uv run --with huggingface-hub==0.36.0 python download_harrier.py \
 
 FROM rust:1.96-bookworm AS server
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential clang cmake pkg-config libssl-dev protobuf-compiler \
+    build-essential clang cmake pkg-config libssl-dev libprotobuf-dev protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY openapi.json ./
 COPY crates/ crates/
-RUN cargo build --release --locked -p paperless-server
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p paperless-server \
+    && cp /src/target/release/paperless-server /usr/local/bin/paperless-server
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libgomp1 poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/paperless
-COPY --from=server /src/target/release/paperless-server /usr/local/bin/paperless-server
+COPY --from=server /usr/local/bin/paperless-server /usr/local/bin/paperless-server
 COPY --from=web /src/web/dist ./web/dist
 COPY --from=model /models ./models
 COPY config/paperless-agx.docker.toml ./config/paperless-agx.toml
