@@ -16,6 +16,8 @@ api_key_env = "OCR_API_KEY"
 # decode is memory-bound, so 6 concurrent pages run ~3x the tokens/s of one.
 max_concurrency = 6
 pages_per_request = 6
+# Leave roughly 2,000 per-slot context tokens for the image and prompt.
+max_output_tokens = 16384
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"

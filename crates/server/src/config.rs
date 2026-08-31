@@ -81,6 +81,7 @@ model = "vision"
 api_key_env = "OCR_API_KEY"
 max_concurrency = 2
 pages_per_request = 4
+max_output_tokens = 16384
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"
@@ -94,6 +95,7 @@ max_concurrency = 1
         let config = AppConfig::load(path).await.unwrap();
         assert_eq!(config.listen_addr.to_string(), "0.0.0.0:3000");
         assert_eq!(config.ocr.pages_per_request, 4);
+        assert_eq!(config.ocr.max_output_tokens, 16_384);
         assert_eq!(config.llm.model, "z-ai/glm-5.3-flash");
         assert_eq!(config.llm.max_concurrency, 1);
     }
@@ -114,6 +116,7 @@ model = "vision"
 api_key_env = "OCR_API_KEY"
 max_concurrency = 2
 pages_per_request = 4
+max_output_tokens = 16384
 "#,
         )
         .unwrap_err();

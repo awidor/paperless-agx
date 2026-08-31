@@ -48,6 +48,7 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
             api_key_env: "PATH".into(),
             max_concurrency: 1,
             pages_per_request: 1,
+            max_output_tokens: 16_384,
         },
         LlmConfig {
             base_url: url::Url::parse("https://openrouter.ai/api/v1").unwrap(),
@@ -141,6 +142,7 @@ async fn missing_embeddings_fails_after_metadata_inference() {
             api_key_env: key_name.into(),
             max_concurrency: 1,
             pages_per_request: 1,
+            max_output_tokens: 16_384,
         },
         LlmConfig {
             base_url,
@@ -244,6 +246,7 @@ async fn metadata_error_fails_the_document() {
             api_key_env: key_name.into(),
             max_concurrency: 1,
             pages_per_request: 1,
+            max_output_tokens: 16_384,
         },
         LlmConfig {
             base_url,
