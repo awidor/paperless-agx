@@ -44,7 +44,7 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
     let ocr = OcrClient::from_environment(
         OcrConfig {
             base_url: url::Url::parse("http://127.0.0.1:1/v1").unwrap(),
-            model: "datalab-to/surya-ocr-2".into(),
+            model: "google/gemini-3.7-flash".into(),
             api_key_env: "PATH".into(),
             max_concurrency: 1,
             pages_per_request: 1,

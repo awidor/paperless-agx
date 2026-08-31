@@ -32,7 +32,7 @@ fn config(data_dir: &Path, base_url: Url) -> AppConfig {
         },
         ocr: OcrConfig {
             base_url,
-            model: "datalab-to/surya-ocr-2".into(),
+            model: "google/gemini-3.7-flash".into(),
             api_key_env: "PATH".into(),
             max_concurrency: 2,
             pages_per_request: 4,
@@ -75,9 +75,14 @@ async fn start_ocr_with_text(text: String) -> Url {
                     })
                 });
                 let content = if is_ocr {
-                    format!(
-                        "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>{text}</p></div>"
-                    )
+                    serde_json::json!({
+                        "blocks": [{
+                            "label": "Text",
+                            "bbox": {"x0": 0, "y0": 0, "x1": 1000, "y1": 1000},
+                            "html": format!("<p>{text}</p>")
+                        }]
+                    })
+                    .to_string()
                 } else if is_answer {
                     serde_json::json!({
                         "answer": "The page contains recognized text.",

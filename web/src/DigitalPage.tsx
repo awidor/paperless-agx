@@ -121,7 +121,7 @@ function childrenToReact(element: Element): ReactNode[] {
   });
 }
 
-/** Top-level positioned blocks of a Surya page, with sanitized inner markup. */
+/** Top-level positioned OCR blocks, with sanitized inner markup. */
 function parseReplicaBlocks(html: string): ReplicaBlock[] {
   const parsed = new DOMParser().parseFromString(html, "text/html");
   const positioned = Array.from(parsed.querySelectorAll("[data-bbox]")).filter(
