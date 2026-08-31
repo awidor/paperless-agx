@@ -12,12 +12,11 @@ max_concurrency = 1
 base_url = "http://127.0.0.1:8765/v1"
 model = "datalab-to/surya-ocr-2"
 api_key_env = "OCR_API_KEY"
-# One request per page, so this is how many llama.cpp slots we keep busy;
-# decode is memory-bound, so 6 concurrent pages run ~3x the tokens/s of one.
-max_concurrency = 6
-pages_per_request = 6
-# Leave roughly 2,000 per-slot context tokens for the image and prompt.
-max_output_tokens = 16384
+# The application runs two document jobs, so one OCR slot per job is sufficient.
+max_concurrency = 2
+pages_per_request = 2
+# The server provides 36,864 tokens per slot; reserve 2,048 for image and prompt.
+max_output_tokens = 34816
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"
