@@ -1,19 +1,27 @@
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use paperless_embeddings::EmbeddingService;
 use paperless_models::{Document, DocumentPage, IngestionStatus};
-use paperless_ocr_client::OcrClient;
+use paperless_ocr_client::{OcrClient, is_transient_request_failure};
 use paperless_search::ChunkRepository;
 use paperless_storage::{DocumentRepository, PageRepository};
 use tokio::sync::{Notify, Semaphore};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{MetadataService, PreviewService, chunk_document};
+
+const TRANSIENT_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+enum ProcessOutcome {
+    Finished,
+    Retry(anyhow::Error),
+}
 
 #[derive(Clone)]
 pub struct IngestionQueue {
@@ -147,7 +155,7 @@ async fn run_dispatcher(
             let active = active.clone();
             let wake = wake.clone();
             tokio::spawn(async move {
-                if let Err(error) = process_document(
+                let retry_error = match process_document(
                     repository,
                     pages,
                     chunks,
@@ -159,13 +167,27 @@ async fn run_dispatcher(
                 )
                 .await
                 {
-                    error!(document_id, error = %error, "ingestion state update failed");
+                    Ok(ProcessOutcome::Finished) => None,
+                    Ok(ProcessOutcome::Retry(error)) => Some(error),
+                    Err(error) => {
+                        error!(document_id, error = %error, "ingestion state update failed");
+                        None
+                    }
+                };
+                drop(permit);
+                if let Some(error) = retry_error {
+                    warn!(
+                        document_id,
+                        retry_delay_seconds = TRANSIENT_RETRY_DELAY.as_secs(),
+                        error = %error,
+                        "transient ingestion failure; retrying"
+                    );
+                    tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
                 }
                 active
                     .lock()
                     .expect("ingestion active set poisoned")
                     .remove(&document_id);
-                drop(permit);
                 wake.notify_one();
             });
         }
@@ -182,7 +204,7 @@ async fn process_document(
     embeddings: Option<EmbeddingService>,
     metadata: MetadataService,
     document_id: u64,
-) -> Result<()> {
+) -> Result<ProcessOutcome> {
     let result: Result<()> = async {
         let mut document = match repository.get(document_id).await? {
             Some(document) if document.deleted_at.is_none() => document,
@@ -264,9 +286,12 @@ async fn process_document(
     .await;
 
     if let Err(error) = result {
+        if is_transient_request_failure(&error) {
+            return Ok(ProcessOutcome::Retry(error));
+        }
         fail_document(repository, document_id, format!("{error:#}")).await?;
     }
-    Ok(())
+    Ok(ProcessOutcome::Finished)
 }
 
 async fn embed_document(

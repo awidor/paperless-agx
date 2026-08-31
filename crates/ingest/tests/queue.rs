@@ -1,4 +1,10 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use chrono::Utc;
 use paperless_ingest::{IngestionQueue, PreviewService};
@@ -69,8 +75,8 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
     assert_eq!(retried.retry_count, 1);
 }
 
-#[tokio::test]
-async fn missing_embeddings_fails_after_metadata_inference() {
+#[tokio::test(start_paused = true)]
+async fn transient_metadata_failure_retries_before_following_stage() {
     let temporary = tempfile::tempdir().unwrap();
     let layout = DataLayout::create(temporary.path()).await.unwrap();
     let repository = DocumentRepository::open(&layout).await.unwrap();
@@ -117,6 +123,8 @@ async fn missing_embeddings_fails_after_metadata_inference() {
         .await
         .unwrap();
 
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let route_attempts = attempts.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url =
         url::Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
@@ -125,8 +133,27 @@ async fn missing_embeddings_fails_after_metadata_inference() {
             listener,
             axum::Router::new().route(
                 "/v1/chat/completions",
-                axum::routing::post(|| async {
-                    r#"{"choices":[{"message":{"content":"{\"title\":\"August statement\",\"sender\":\"Stadtwerke\",\"created_at\":\"2026-08-01\"}"}}]}"#
+                axum::routing::post(move || {
+                    let route_attempts = route_attempts.clone();
+                    async move {
+                        let attempt = route_attempts.fetch_add(1, Ordering::SeqCst);
+                        let (status, body) = if attempt < 5 {
+                            (
+                                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                                r#"{"error":"busy"}"#,
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::OK,
+                                r#"{"choices":[{"message":{"content":"{\"title\":\"August statement\",\"sender\":\"Stadtwerke\",\"created_at\":\"2026-08-01\"}"}}]}"#,
+                            )
+                        };
+                        (
+                            status,
+                            [(axum::http::header::RETRY_AFTER, "0")],
+                            body,
+                        )
+                    }
                 }),
             ),
         )
@@ -158,8 +185,14 @@ async fn missing_embeddings_fails_after_metadata_inference() {
             .await
             .unwrap();
 
+    wait_for_attempts(&attempts, 5).await;
+    let pending = repository.get(document.document_id).await.unwrap().unwrap();
+    assert_eq!(pending.status, IngestionStatus::TextReady);
+    assert!(pending.last_error.is_none());
+    tokio::time::advance(Duration::from_secs(61)).await;
     let failed = wait_for_status(&repository, document.document_id, IngestionStatus::Failed).await;
     unsafe { std::env::remove_var(key_name) };
+    assert_eq!(attempts.load(Ordering::SeqCst), 6);
     assert_eq!(failed.title.as_deref(), Some("August statement"));
     assert_eq!(
         failed.created_at.unwrap().to_rfc3339(),
@@ -230,7 +263,7 @@ async fn metadata_error_fails_the_document() {
             axum::Router::new().route(
                 "/v1/chat/completions",
                 axum::routing::post(|| async {
-                    (axum::http::StatusCode::TOO_MANY_REQUESTS, "busy")
+                    (axum::http::StatusCode::BAD_REQUEST, "invalid request")
                 }),
             ),
         )
@@ -266,7 +299,7 @@ async fn metadata_error_fails_the_document() {
     unsafe { std::env::remove_var(key_name) };
     let error = failed.last_error.unwrap();
     assert!(error.contains("metadata inference failed"));
-    assert!(error.contains("429"));
+    assert!(error.contains("400"));
     assert!(failed.title.is_none());
 }
 
@@ -283,4 +316,14 @@ async fn wait_for_status(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("document did not reach {expected}");
+}
+
+async fn wait_for_attempts(attempts: &AtomicUsize, expected: usize) {
+    for _ in 0..1_000 {
+        if attempts.load(Ordering::SeqCst) >= expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("metadata request did not reach {expected} attempts");
 }
