@@ -10,14 +10,14 @@ use paperless_models::{Document, DocumentPage, IngestionStatus};
 use paperless_ocr_client::OcrClient;
 use paperless_search::ChunkRepository;
 use paperless_storage::{DocumentRepository, PageRepository};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore};
 use tracing::error;
 
 use crate::{MetadataService, PreviewService, chunk_document};
 
 #[derive(Clone)]
 pub struct IngestionQueue {
-    sender: mpsc::Sender<u64>,
+    wake: Arc<Notify>,
     repository: DocumentRepository,
 }
 
@@ -39,15 +39,15 @@ impl IngestionQueue {
         if job_concurrency == 0 {
             bail!("job_concurrency must be greater than zero");
         }
-        let (sender, receiver) = mpsc::channel(capacity);
+        let wake = Arc::new(Notify::new());
         let queue = Self {
-            sender,
+            wake: wake.clone(),
             repository: repository.clone(),
         };
         let metadata = MetadataService::new(repository.clone(), chunks.clone());
         tokio::spawn(run_dispatcher(
-            receiver,
-            Arc::new(repository.clone()),
+            wake,
+            Arc::new(repository),
             Arc::new(pages),
             Arc::new(chunks),
             previews,
@@ -56,17 +56,13 @@ impl IngestionQueue {
             metadata,
             job_concurrency,
         ));
-        for document in repository.list_resumable_ingestion().await? {
-            queue.enqueue(document.document_id).await?;
-        }
+        queue.wake.notify_one();
         Ok(queue)
     }
 
-    pub async fn enqueue(&self, document_id: u64) -> Result<()> {
-        self.sender
-            .send(document_id)
-            .await
-            .context("ingestion queue stopped")
+    pub async fn enqueue(&self, _document_id: u64) -> Result<()> {
+        self.wake.notify_one();
+        Ok(())
     }
 
     pub async fn retry(&self, document_id: u64) -> Result<()> {
@@ -96,7 +92,7 @@ impl IngestionQueue {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_dispatcher(
-    mut receiver: mpsc::Receiver<u64>,
+    wake: Arc<Notify>,
     repository: Arc<DocumentRepository>,
     pages: Arc<PageRepository>,
     chunks: Arc<ChunkRepository>,
@@ -108,46 +104,71 @@ async fn run_dispatcher(
 ) {
     let job_gate = Arc::new(Semaphore::new(job_concurrency));
     let active = Arc::new(Mutex::new(HashSet::new()));
-    while let Some(document_id) = receiver.recv().await {
-        {
-            let mut active = active.lock().expect("ingestion active set poisoned");
-            if !active.insert(document_id) {
+    loop {
+        wake.notified().await;
+        let mut documents = match repository.list_resumable_ingestion().await {
+            Ok(documents) => documents,
+            Err(error) => {
+                error!(error = %error, "list durable ingestion work");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                wake.notify_one();
                 continue;
             }
-        }
-        let permit = match job_gate.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => break,
         };
-        let repository = repository.clone();
-        let pages = pages.clone();
-        let chunks = chunks.clone();
-        let previews = previews.clone();
-        let ocr = ocr.clone();
-        let embeddings = embeddings.clone();
-        let metadata = metadata.clone();
-        let active = active.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            if let Err(error) = process_document(
-                repository,
-                pages,
-                chunks,
-                previews,
-                ocr,
-                embeddings,
-                metadata,
-                document_id,
-            )
-            .await
+        documents.sort_by(|left, right| {
+            left.added_at
+                .cmp(&right.added_at)
+                .then_with(|| left.document_id.cmp(&right.document_id))
+        });
+        for document in documents {
+            let document_id = document.document_id;
+            if active
+                .lock()
+                .expect("ingestion active set poisoned")
+                .contains(&document_id)
             {
-                error!(document_id, error = %error, "ingestion state update failed");
+                continue;
             }
+            let permit = match job_gate.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => break,
+            };
             active
                 .lock()
                 .expect("ingestion active set poisoned")
-                .remove(&document_id);
-        });
+                .insert(document_id);
+            let repository = repository.clone();
+            let pages = pages.clone();
+            let chunks = chunks.clone();
+            let previews = previews.clone();
+            let ocr = ocr.clone();
+            let embeddings = embeddings.clone();
+            let metadata = metadata.clone();
+            let active = active.clone();
+            let wake = wake.clone();
+            tokio::spawn(async move {
+                if let Err(error) = process_document(
+                    repository,
+                    pages,
+                    chunks,
+                    previews,
+                    ocr,
+                    embeddings,
+                    metadata,
+                    document_id,
+                )
+                .await
+                {
+                    error!(document_id, error = %error, "ingestion state update failed");
+                }
+                active
+                    .lock()
+                    .expect("ingestion active set poisoned")
+                    .remove(&document_id);
+                drop(permit);
+                wake.notify_one();
+            });
+        }
     }
 }
 

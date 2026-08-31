@@ -446,7 +446,7 @@ export default function App() {
     ? `Uploading ${uploadState.completed + 1} of ${uploadState.total}: ${uploadState.current}`
     : uploadState
       ? [
-          uploadState.uploaded > 0 && `${uploadState.uploaded} uploaded`,
+          uploadState.uploaded > 0 && `${uploadState.uploaded} queued for processing`,
           uploadState.duplicates > 0 && `${uploadState.duplicates} already in the library`,
           uploadState.failures.length > 0 && uploadState.failures.join(" · "),
         ].filter(Boolean).join(" · ")

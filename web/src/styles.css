@@ -304,11 +304,12 @@ main { width: min(1160px, 92vw); margin: 0 auto; padding: 26px 0 72px; }
 .detail-tabs button:hover { color: var(--ink); }
 .detail-tabs button.active { color: var(--pen); border-bottom-color: var(--pen); }
 /* Chrome around the page must not join a drag selection over the page. */
-.detail-tabs, .selection-hint, .page-controls, .thumbnail-rail,
-.metadata-column, .detail-panel button {
+.detail-tabs, .selection-hint, .page-controls, .thumbnail-rail, .detail-panel button {
   user-select: none; -webkit-user-select: none;
 }
-.metadata-column input { user-select: text; -webkit-user-select: text; }
+.detail-heading, .metadata-column, .error-banner, .metadata-column input {
+  user-select: text; -webkit-user-select: text;
+}
 .detail-content {
   flex: 1; min-height: 0; overflow: hidden;
   display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; padding: 20px 28px 24px;

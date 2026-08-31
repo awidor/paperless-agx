@@ -44,6 +44,19 @@ async fn start_ocr() -> Url {
     start_ocr_with_text("Recognized page text".into()).await
 }
 
+async fn start_blocked_ocr() -> Url {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async { std::future::pending::<String>().await }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    Url::parse(&format!("http://{address}/v1")).unwrap()
+}
+
 async fn start_ocr_with_text(text: String) -> Url {
     let app = Router::new().route(
         "/v1/chat/completions",
@@ -94,6 +107,16 @@ async fn start_ocr_with_text(text: String) -> Url {
 fn png() -> Vec<u8> {
     let mut output = Cursor::new(Vec::new());
     DynamicImage::new_rgb8(16, 12)
+        .write_to(&mut output, ImageFormat::Png)
+        .unwrap();
+    output.into_inner()
+}
+
+fn unique_png(value: u8) -> Vec<u8> {
+    let mut image = image::RgbImage::new(16, 12);
+    image.put_pixel(0, 0, image::Rgb([value, 0, 0]));
+    let mut output = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(image)
         .write_to(&mut output, ImageFormat::Png)
         .unwrap();
     output.into_inner()
@@ -167,7 +190,11 @@ async fn wait_for_ocr(app: &Router, document_id: u64) -> Document {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("document did not finish OCR");
+    let document = get_document(app, document_id).await;
+    panic!(
+        "document did not finish OCR: status={}, error={:?}",
+        document.status, document.last_error
+    );
 }
 
 async fn wait_for_ready(app: &Router, document_id: u64) -> Document {
@@ -185,6 +212,30 @@ async fn wait_for_ready(app: &Router, document_id: u64) -> Document {
     panic!("document stopped at {}", document.status);
 }
 
+#[tokio::test]
+async fn upload_acceptance_does_not_wait_for_processing_capacity() {
+    let temporary = tempfile::tempdir().unwrap();
+    let app = build_app(config(temporary.path(), start_blocked_ocr().await))
+        .await
+        .unwrap();
+
+    for index in 1..=8 {
+        let bytes = unique_png(index);
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            upload(
+                &app,
+                &format!("queued-{index}.png"),
+                "image/png",
+                &bytes,
+                "",
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("upload {index} waited for processing capacity"));
+        assert_eq!(result.0, StatusCode::CREATED);
+    }
+}
 #[tokio::test]
 async fn upload_with_embeddings_reaches_ready_and_is_searchable() {
     let Some(model_dir) =

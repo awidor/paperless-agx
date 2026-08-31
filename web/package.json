@@ -7,6 +7,7 @@
     "dev": "vite",
     "generate:api": "openapi-typescript ../openapi.json -o src/api.generated.ts",
     "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test",
     "build": "bun run generate:api && tsc --noEmit && vite build"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
     "vite": "7.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "openapi-typescript": "7.10.1",
