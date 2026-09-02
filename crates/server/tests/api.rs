@@ -32,7 +32,7 @@ fn config(data_dir: &Path, base_url: Url) -> AppConfig {
         },
         ocr: OcrConfig {
             base_url,
-            model: "google/gemini-3.7-flash".into(),
+            model: "chandra".into(),
             api_key_env: "PATH".into(),
             max_concurrency: 2,
             pages_per_request: 4,

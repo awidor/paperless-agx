@@ -76,12 +76,12 @@ render_concurrency = 2
 eager_thumbnail_pages = 3
 
 [ocr]
-base_url = "https://openrouter.ai/api/v1"
-model = "google/gemini-3.7-flash"
-api_key_env = "OPENROUTER_API_KEY"
+base_url = "http://127.0.0.1:8765/v1"
+model = "chandra"
+api_key_env = "OCR_API_KEY"
 max_concurrency = 2
-pages_per_request = 4
-max_output_tokens = 32768
+pages_per_request = 2
+max_output_tokens = 12384
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"
@@ -94,9 +94,9 @@ max_concurrency = 1
         .unwrap();
         let config = AppConfig::load(path).await.unwrap();
         assert_eq!(config.listen_addr.to_string(), "0.0.0.0:3000");
-        assert_eq!(config.ocr.pages_per_request, 4);
-        assert_eq!(config.ocr.model, "google/gemini-3.7-flash");
-        assert_eq!(config.ocr.max_output_tokens, 32_768);
+        assert_eq!(config.ocr.pages_per_request, 2);
+        assert_eq!(config.ocr.model, "chandra");
+        assert_eq!(config.ocr.max_output_tokens, 12_384);
         assert_eq!(config.llm.model, "z-ai/glm-5.3-flash");
         assert_eq!(config.llm.max_concurrency, 1);
     }
@@ -112,12 +112,12 @@ render_concurrency = 2
 eager_thumbnail_pages = 3
 
 [ocr]
-base_url = "https://openrouter.ai/api/v1"
-model = "google/gemini-3.7-flash"
-api_key_env = "OPENROUTER_API_KEY"
+base_url = "http://127.0.0.1:8765/v1"
+model = "chandra"
+api_key_env = "OCR_API_KEY"
 max_concurrency = 2
-pages_per_request = 4
-max_output_tokens = 32768
+pages_per_request = 2
+max_output_tokens = 12384
 "#,
         )
         .unwrap_err();

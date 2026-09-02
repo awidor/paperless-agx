@@ -9,14 +9,13 @@ model_dir = "data/models/harrier-oss-v1-0.6b"
 max_concurrency = 1
 
 [ocr]
-base_url = "https://openrouter.ai/api/v1"
-model = "google/gemini-3.7-flash"
-api_key_env = "OPENROUTER_API_KEY"
-# The application runs two document jobs, so one hosted OCR request per job is sufficient.
+base_url = "http://127.0.0.1:8765/v1"
+model = "chandra"
+api_key_env = "OCR_API_KEY"
+# Match the two llama.cpp slots on the Proxmox Chandra server.
 max_concurrency = 2
 pages_per_request = 2
-# Leave room for dense pages while staying below Gemini's output limit.
-max_output_tokens = 32768
+max_output_tokens = 12384
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"

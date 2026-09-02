@@ -343,7 +343,7 @@ main { width: min(1160px, 92vw); margin: 0 auto; padding: 26px 0 72px; }
 .digital-block table { width: 100%; height: 100%; border-collapse: collapse; }
 .digital-block td, .digital-block th { vertical-align: top; }
 .digital-block pre { white-space: pre-wrap; }
-/* Surya emits rules inside tight boxes; default hr margins alone would overflow. */
+/* Chandra emits rules inside tight boxes; default hr margins alone would overflow. */
 .digital-block hr { margin: 0; border: none; border-top: 1px solid var(--line); }
 .digital-block--section-header, .digital-block--title, .digital-block--heading { font-family: var(--serif); font-weight: 600; }
 .digital-block--page-footer, .digital-block--footnote, .digital-block--caption { color: var(--muted); }
