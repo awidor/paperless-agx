@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 #[derive(Debug, Clone)]
 pub struct DataLayout {
     pub root: PathBuf,
+    pub database: PathBuf,
     pub objects: PathBuf,
-    pub lance: PathBuf,
     pub thumbnails: PathBuf,
     pub page_images: PathBuf,
     pub temporary: PathBuf,
@@ -16,8 +16,8 @@ impl DataLayout {
     pub async fn create(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let layout = Self {
+            database: root.join("paperless.sqlite"),
             objects: root.join("objects"),
-            lance: root.join("lance"),
             thumbnails: root.join("thumbnails"),
             page_images: root.join("page-images"),
             temporary: root.join("tmp"),
@@ -26,7 +26,6 @@ impl DataLayout {
         for directory in [
             &layout.root,
             &layout.objects,
-            &layout.lance,
             &layout.thumbnails,
             &layout.page_images,
             &layout.temporary,
@@ -71,14 +70,14 @@ mod tests {
     use super::DataLayout;
 
     #[tokio::test]
-    async fn creates_all_persistent_directories() {
+    async fn creates_persistent_directories_and_database_path() {
         let temporary = tempfile::tempdir().unwrap();
         let layout = DataLayout::create(temporary.path()).await.unwrap();
         assert!(layout.objects.is_dir());
-        assert!(layout.lance.is_dir());
         assert!(layout.thumbnails.is_dir());
         assert!(layout.page_images.is_dir());
         assert!(layout.temporary.is_dir());
+        assert_eq!(layout.database, temporary.path().join("paperless.sqlite"));
         assert_eq!(
             layout.object_path(&[2; 32]),
             layout.objects.join("02").join("02".repeat(32))

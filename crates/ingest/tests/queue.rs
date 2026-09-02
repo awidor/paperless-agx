@@ -10,8 +10,9 @@ use chrono::Utc;
 use paperless_ingest::{IngestionQueue, PreviewService};
 use paperless_models::{Document, DocumentPage, IngestionStatus, MediaType};
 use paperless_ocr_client::{LlmConfig, OcrClient, OcrConfig};
-use paperless_search::ChunkRepository;
-use paperless_storage::{DataLayout, DocumentRepository, ObjectStore, PageRepository};
+use paperless_storage::{
+    ChunkRepository, DataLayout, DocumentRepository, ObjectStore, PageRepository,
+};
 
 #[tokio::test]
 async fn failure_is_persisted_and_manual_retry_is_counted() {
@@ -19,7 +20,7 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
     let layout = DataLayout::create(temporary.path()).await.unwrap();
     let repository = DocumentRepository::open(&layout).await.unwrap();
     let pages = PageRepository::open(&layout).await.unwrap();
-    let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
+    let chunks = ChunkRepository::open(&layout).await.unwrap();
     let object = ObjectStore::new(layout.clone())
         .store(b"not an image".as_slice())
         .await
@@ -81,7 +82,7 @@ async fn transient_metadata_failure_retries_before_following_stage() {
     let layout = DataLayout::create(temporary.path()).await.unwrap();
     let repository = DocumentRepository::open(&layout).await.unwrap();
     let pages = PageRepository::open(&layout).await.unwrap();
-    let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
+    let chunks = ChunkRepository::open(&layout).await.unwrap();
     let object = ObjectStore::new(layout.clone())
         .store(b"stored document".as_slice())
         .await
@@ -212,7 +213,7 @@ async fn metadata_error_fails_the_document() {
     let layout = DataLayout::create(temporary.path()).await.unwrap();
     let repository = DocumentRepository::open(&layout).await.unwrap();
     let pages = PageRepository::open(&layout).await.unwrap();
-    let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
+    let chunks = ChunkRepository::open(&layout).await.unwrap();
     let object = ObjectStore::new(layout.clone())
         .store(b"stored document".as_slice())
         .await

@@ -59,49 +59,66 @@ async fn start_blocked_ocr() -> Url {
 }
 
 async fn start_ocr_with_text(text: String) -> Url {
-    let app = Router::new().route(
-        "/v1/chat/completions",
-        post(move |Json(body): Json<serde_json::Value>| {
-            let text = text.clone();
-            async move {
-                let content = body["messages"][0]["content"].as_array();
-                let is_ocr = content
-                    .is_some_and(|items| items.iter().any(|item| item["type"] == "image_url"));
-                let is_answer = content.is_some_and(|items| {
-                    items.iter().any(|item| {
-                        item["text"]
-                            .as_str()
-                            .is_some_and(|text| text.contains("numbered evidence passages"))
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let text = text.clone();
+                async move {
+                    let content = body["messages"][0]["content"].as_array();
+                    let is_ocr =
+                        content.is_some_and(|items| items.iter().any(|item| item["type"] == "image_url"));
+                    let is_answer = content.is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item["text"]
+                                .as_str()
+                                .is_some_and(|text| text.contains("numbered evidence passages"))
+                        })
+                    });
+                    let content = if is_ocr {
+                        format!(
+                            "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>{text}</p></div>"
+                        )
+                    } else if is_answer {
+                        serde_json::json!({
+                            "answer": "The page contains recognized text.",
+                            "citations": [1]
+                        })
+                        .to_string()
+                    } else {
+                        serde_json::json!({
+                            "title": "Extracted title",
+                            "created_at": null
+                        })
+                        .to_string()
+                    };
+                    Json(serde_json::json!({
+                        "choices": [{"message": {"content": content}}]
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/v1/embeddings",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let count = body["input"].as_array().map_or(1, Vec::len);
+                let values = vec![1.0_f32; 1024];
+                let embedding = (0..count)
+                    .map(|index| {
+                        serde_json::json!({
+                            "object": "embedding",
+                            "embedding": values.clone(),
+                            "index": index
+                        })
                     })
-                });
-                let content = if is_ocr {
-                    serde_json::json!({
-                        "blocks": [{
-                            "label": "Text",
-                            "bbox": {"x0": 0, "y0": 0, "x1": 1000, "y1": 1000},
-                            "html": format!("<p>{text}</p>")
-                        }]
-                    })
-                    .to_string()
-                } else if is_answer {
-                    serde_json::json!({
-                        "answer": "The page contains recognized text.",
-                        "citations": [1]
-                    })
-                    .to_string()
-                } else {
-                    serde_json::json!({
-                        "title": "Extracted title",
-                        "created_at": null
-                    })
-                    .to_string()
-                };
+                    .collect::<Vec<_>>();
                 Json(serde_json::json!({
-                    "choices": [{"message": {"content": content}}]
+                    "object": "list",
+                    "data": embedding,
+                    "model": body["model"]
                 }))
-            }
-        }),
-    );
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -244,19 +261,13 @@ async fn upload_acceptance_does_not_wait_for_processing_capacity() {
 }
 #[tokio::test]
 async fn upload_with_embeddings_reaches_ready_and_is_searchable() {
-    let Some(model_dir) =
-        std::env::var_os("PAPERLESS_HARRIER_MODEL_DIR").map(std::path::PathBuf::from)
-    else {
-        eprintln!("PAPERLESS_HARRIER_MODEL_DIR is not set; skipping embedding E2E test");
-        return;
-    };
     let temporary = tempfile::tempdir().unwrap();
-    let mut settings = config(
-        temporary.path(),
-        start_ocr_with_text("Recognized page text. ".repeat(150)).await,
-    );
+    let base_url = start_ocr_with_text("Recognized page text. ".repeat(150)).await;
+    let mut settings = config(temporary.path(), base_url.clone());
     settings.embeddings = Some(EmbeddingConfig {
-        model_dir,
+        base_url,
+        model: "harrier".into(),
+        api_key_env: "PATH".into(),
         max_concurrency: 1,
     });
     let app = build_app(settings).await.unwrap();

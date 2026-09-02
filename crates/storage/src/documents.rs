@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     str::FromStr,
     sync::{
         Arc,
@@ -8,43 +7,36 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use arrow_array::{
-    Array, ArrayRef, FixedSizeBinaryArray, RecordBatch, RecordBatchIterator, RecordBatchReader,
-    StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
-};
-use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::{DateTime, Utc};
-use futures::TryStreamExt;
-use lancedb::{
-    Connection, Table,
-    query::{ExecutableQuery, QueryBase},
-    table::NewColumnTransform,
-};
 use paperless_models::{Document, IngestionStatus, MediaType, MetadataSource, UploadMetadata};
+use rusqlite::{OptionalExtension, params};
 
-use crate::layout::{DataLayout, hash_hex};
-
-const DOCUMENTS_TABLE: &str = "documents";
+use crate::{DataLayout, database::Database};
 
 #[derive(Clone)]
 pub struct DocumentRepository {
-    table: Table,
+    database: Database,
     next_id: Arc<AtomicU64>,
 }
 
 impl DocumentRepository {
     pub async fn open(layout: &DataLayout) -> Result<Self> {
-        let connection = lancedb::connect(layout.lance.to_string_lossy().as_ref())
-            .execute()
-            .await
-            .context("connect to LanceDB")?;
-        let table = open_or_create_documents(&connection).await?;
-        let next_id = maximum_document_id(&table)
-            .await?
-            .checked_add(1)
-            .context("document id space is exhausted")?;
+        let database = Database::open(layout).await?;
+        let next_id = database
+            .run(|connection| {
+                let maximum: Option<i64> =
+                    connection.query_row("SELECT MAX(document_id) FROM documents", [], |row| {
+                        row.get(0)
+                    })?;
+                let maximum = maximum.unwrap_or(0);
+                u64::try_from(maximum)
+                    .context("stored document id is negative")?
+                    .checked_add(1)
+                    .context("document id space is exhausted")
+            })
+            .await?;
         Ok(Self {
-            table,
+            database,
             next_id: Arc::new(AtomicU64::new(next_id)),
         })
     }
@@ -54,147 +46,168 @@ impl DocumentRepository {
     }
 
     pub async fn insert(&self, document: &Document) -> Result<()> {
-        let batch = document_batch(document)?;
-        let schema = batch.schema();
-        let reader: Box<dyn RecordBatchReader + Send> =
-            Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
-        self.table
-            .add(reader)
-            .execute()
+        let document = document.clone();
+        self.database
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "INSERT INTO documents (
+                            document_id, content_hash, media_type, filename, title, sender,
+                            created_at, added_at, updated_at, title_source, sender_source,
+                            created_at_source, page_count, file_size, status, last_error,
+                            retry_count, deleted_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        params![
+                            i64_value(document.document_id, "document id")?,
+                            document.content_hash.as_slice(),
+                            document.media_type.as_str(),
+                            document.filename,
+                            document.title,
+                            document.sender,
+                            optional_timestamp(document.created_at),
+                            timestamp(document.added_at),
+                            timestamp(document.updated_at),
+                            optional_source(document.title_source),
+                            optional_source(document.sender_source),
+                            optional_source(document.created_at_source),
+                            i64_value(u64::from(document.page_count), "page count")?,
+                            i64_value(document.file_size, "file size")?,
+                            document.status.as_str(),
+                            document.last_error,
+                            i64_value(u64::from(document.retry_count), "retry count")?,
+                            optional_timestamp(document.deleted_at),
+                        ],
+                    )
+                    .context("insert document")?;
+                Ok(())
+            })
             .await
-            .context("insert document")?;
-        Ok(())
     }
 
-    pub fn get(
-        &self,
-        document_id: u64,
-    ) -> impl Future<Output = Result<Option<Document>>> + Send + 'static {
-        let table = self.table.clone();
-        async move {
-            let batches = table
-                .query()
-                .only_if(format!("document_id = {document_id}"))
-                .limit(1)
-                .execute()
-                .await
-                .context("query document by id")?
-                .try_collect::<Vec<_>>()
-                .await
-                .context("read document by id")?;
-            documents_from_batches(&batches).map(|mut documents| documents.pop())
-        }
+    pub async fn get(&self, document_id: u64) -> Result<Option<Document>> {
+        let document_id = i64_value(document_id, "document id")?;
+        self.database
+            .run(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT document_id, content_hash, media_type, filename, title, sender,
+                                created_at, added_at, updated_at, title_source, sender_source,
+                                created_at_source, page_count, file_size, status, last_error,
+                                retry_count, deleted_at
+                         FROM documents WHERE document_id = ?",
+                        [document_id],
+                        document_from_row,
+                    )
+                    .optional()
+                    .context("query document by id")
+            })
+            .await
     }
 
     pub async fn find_by_hash(&self, content_hash: &[u8; 32]) -> Result<Option<Document>> {
-        let literal = hash_hex(content_hash);
-        let batches = self
-            .table
-            .query()
-            .only_if(format!(
-                "content_hash = X'{literal}' AND deleted_at IS NULL"
-            ))
-            .limit(1)
-            .execute()
+        let content_hash = content_hash.to_vec();
+        self.database
+            .run(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT document_id, content_hash, media_type, filename, title, sender,
+                                created_at, added_at, updated_at, title_source, sender_source,
+                                created_at_source, page_count, file_size, status, last_error,
+                                retry_count, deleted_at
+                         FROM documents
+                         WHERE content_hash = ? AND deleted_at IS NULL
+                         LIMIT 1",
+                        [content_hash],
+                        document_from_row,
+                    )
+                    .optional()
+                    .context("query document by content hash")
+            })
             .await
-            .context("query document by content hash")?
-            .try_collect::<Vec<_>>()
-            .await
-            .context("read document by content hash")?;
-        documents_from_batches(&batches).map(|mut documents| documents.pop())
     }
 
     pub async fn list_active(&self) -> Result<Vec<Document>> {
-        let batches = self
-            .table
-            .query()
-            .only_if("deleted_at IS NULL")
-            .execute()
+        self.list_where("deleted_at IS NULL", "list active documents")
             .await
-            .context("query active documents")?
-            .try_collect::<Vec<_>>()
-            .await
-            .context("read active documents")?;
-        let mut documents = documents_from_batches(&batches)?;
-        documents.sort_by(|left, right| {
-            let left_date = left.created_at.unwrap_or(left.added_at);
-            let right_date = right.created_at.unwrap_or(right.added_at);
-            right_date
-                .cmp(&left_date)
-                .then_with(|| right.document_id.cmp(&left.document_id))
-        });
-        Ok(documents)
     }
 
     pub async fn list_resumable_ingestion(&self) -> Result<Vec<Document>> {
-        let batches = self
-            .table
-            .query()
-            .only_if("deleted_at IS NULL AND status IN ('STORED', 'PREVIEWING', 'OCR', 'TEXT_READY', 'EMBEDDING', 'INDEXING')")
-            .execute()
-            .await
-            .context("query resumable documents")?
-            .try_collect::<Vec<_>>()
-            .await
-            .context("read resumable documents")?;
-        documents_from_batches(&batches)
+        self.list_where(
+            "deleted_at IS NULL AND status IN ('STORED', 'PREVIEWING', 'OCR', 'TEXT_READY', 'EMBEDDING', 'INDEXING')",
+            "list resumable documents",
+        )
+        .await
     }
 
-    pub fn set_status(
+    pub async fn set_status(
         &self,
         document_id: u64,
         status: IngestionStatus,
         last_error: Option<String>,
-    ) -> impl Future<Output = Result<()>> + Send + 'static {
-        let table = self.table.clone();
-        async move {
-            let mut update = table
-                .update()
-                .only_if(format!("document_id = {document_id}"))
-                .column("status", sql_string(status.as_str()))
-                .column("updated_at", "now()");
-            update = match last_error {
-                Some(error) => update.column("last_error", sql_string(&error)),
-                None => update.column("last_error", "NULL"),
-            };
-            update.execute().await.context("update document status")?;
-            Ok(())
-        }
+    ) -> Result<()> {
+        let document_id = i64_value(document_id, "document id")?;
+        self.database
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "UPDATE documents
+                         SET status = ?, last_error = ?, updated_at = ?
+                         WHERE document_id = ?",
+                        params![
+                            status.as_str(),
+                            last_error,
+                            timestamp(Utc::now()),
+                            document_id
+                        ],
+                    )
+                    .context("update document status")?;
+                Ok(())
+            })
+            .await
     }
 
-    pub fn set_preview_ready(
-        &self,
-        document_id: u64,
-        page_count: u32,
-    ) -> impl Future<Output = Result<()>> + Send + 'static {
-        let table = self.table.clone();
-        async move {
-            table
-                .update()
-                .only_if(format!("document_id = {document_id}"))
-                .column("page_count", page_count.to_string())
-                .column("status", sql_string(IngestionStatus::Ocr.as_str()))
-                .column("last_error", "NULL")
-                .column("updated_at", "now()")
-                .execute()
-                .await
-                .context("store preview result")?;
-            Ok(())
-        }
+    pub async fn set_preview_ready(&self, document_id: u64, page_count: u32) -> Result<()> {
+        let document_id = i64_value(document_id, "document id")?;
+        self.database
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "UPDATE documents
+                         SET page_count = ?, status = ?, last_error = NULL, updated_at = ?
+                         WHERE document_id = ?",
+                        params![
+                            i64_value(u64::from(page_count), "page count")?,
+                            IngestionStatus::Ocr.as_str(),
+                            timestamp(Utc::now()),
+                            document_id
+                        ],
+                    )
+                    .context("store preview result")?;
+                Ok(())
+            })
+            .await
     }
 
     pub async fn mark_retry(&self, document_id: u64) -> Result<()> {
-        self.table
-            .update()
-            .only_if(format!("document_id = {document_id}"))
-            .column("retry_count", "retry_count + 1")
-            .column("status", sql_string(IngestionStatus::Stored.as_str()))
-            .column("last_error", "NULL")
-            .column("updated_at", "now()")
-            .execute()
+        let document_id = i64_value(document_id, "document id")?;
+        self.database
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "UPDATE documents
+                         SET retry_count = retry_count + 1, status = ?, last_error = NULL,
+                             updated_at = ?
+                         WHERE document_id = ?",
+                        params![
+                            IngestionStatus::Stored.as_str(),
+                            timestamp(Utc::now()),
+                            document_id
+                        ],
+                    )
+                    .context("mark document for retry")?;
+                Ok(())
+            })
             .await
-            .context("mark document for retry")?;
-        Ok(())
     }
 
     pub async fn merge_missing_upload_metadata(
@@ -202,107 +215,119 @@ impl DocumentRepository {
         existing: &Document,
         metadata: &UploadMetadata,
     ) -> Result<Document> {
-        let mut update = self
-            .table
-            .update()
-            .only_if(format!("document_id = {}", existing.document_id));
-        let mut changed = false;
-        if existing.title.is_none() && metadata.title.is_some() {
-            update = update
-                .column("title", sql_string(metadata.title.as_deref().unwrap()))
-                .column("title_source", sql_string(MetadataSource::Manual.as_str()));
-            changed = true;
-        }
-        if existing.created_at.is_none() && metadata.created_at.is_some() {
-            update = update
-                .column(
-                    "created_at",
-                    format!(
-                        "arrow_cast({}, 'Timestamp(Microsecond, Some(\"UTC\"))')",
-                        metadata.created_at.unwrap().timestamp_micros()
-                    ),
-                )
-                .column(
-                    "created_at_source",
-                    sql_string(MetadataSource::Manual.as_str()),
-                );
-            changed = true;
-        }
-        if changed {
-            update
-                .column("updated_at", "now()")
-                .execute()
-                .await
-                .context("merge duplicate upload metadata")?;
-        }
-        self.get(existing.document_id)
-            .await?
-            .context("duplicate document disappeared after metadata merge")
+        let document_id = i64_value(existing.document_id, "document id")?;
+        let title = (existing.title.is_none() && metadata.title.is_some())
+            .then(|| metadata.title.clone())
+            .flatten();
+        let created_at = (existing.created_at.is_none() && metadata.created_at.is_some())
+            .then_some(metadata.created_at)
+            .flatten();
+        let database = self.database.clone();
+        database
+            .run(move |connection| {
+                if title.is_some() || created_at.is_some() {
+                    connection
+                        .execute(
+                            "UPDATE documents
+                             SET title = COALESCE(title, ?),
+                                 title_source = CASE WHEN title IS NULL AND ? IS NOT NULL THEN ? ELSE title_source END,
+                                 created_at = COALESCE(created_at, ?),
+                                 created_at_source = CASE WHEN created_at IS NULL AND ? IS NOT NULL THEN ? ELSE created_at_source END,
+                                 updated_at = ?
+                             WHERE document_id = ?",
+                            params![
+                                title,
+                                title,
+                                MetadataSource::Manual.as_str(),
+                                created_at.map(timestamp),
+                                created_at.map(timestamp),
+                                MetadataSource::Manual.as_str(),
+                                timestamp(Utc::now()),
+                                document_id,
+                            ],
+                        )
+                        .context("merge duplicate upload metadata")?;
+                }
+                connection
+                    .query_row(
+                        "SELECT document_id, content_hash, media_type, filename, title, sender,
+                                created_at, added_at, updated_at, title_source, sender_source,
+                                created_at_source, page_count, file_size, status, last_error,
+                                retry_count, deleted_at
+                         FROM documents WHERE document_id = ?",
+                        [document_id],
+                        document_from_row,
+                    )
+                    .optional()?
+                    .context("duplicate document disappeared after metadata merge")
+            })
+            .await
     }
 
     pub async fn write_metadata(&self, document: &Document) -> Result<()> {
-        let update = self
-            .table
-            .update()
-            .only_if(format!("document_id = {}", document.document_id))
-            .column("title", sql_optional_string(document.title.as_deref()))
-            .column("sender", sql_optional_string(document.sender.as_deref()))
-            .column("created_at", sql_optional_timestamp(document.created_at))
-            .column("title_source", sql_optional_source(document.title_source))
-            .column("sender_source", sql_optional_source(document.sender_source))
-            .column(
-                "created_at_source",
-                sql_optional_source(document.created_at_source),
-            )
-            .column("updated_at", "now()");
-        update.execute().await.context("write document metadata")?;
-        Ok(())
+        let document = document.clone();
+        self.database
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "UPDATE documents
+                         SET title = ?, sender = ?, created_at = ?, title_source = ?,
+                             sender_source = ?, created_at_source = ?, updated_at = ?
+                         WHERE document_id = ?",
+                        params![
+                            document.title,
+                            document.sender,
+                            optional_timestamp(document.created_at),
+                            optional_source(document.title_source),
+                            optional_source(document.sender_source),
+                            optional_source(document.created_at_source),
+                            timestamp(Utc::now()),
+                            i64_value(document.document_id, "document id")?,
+                        ],
+                    )
+                    .context("write document metadata")?;
+                Ok(())
+            })
+            .await
     }
 
     pub async fn soft_delete(&self, document_id: u64) -> Result<()> {
-        self.table
-            .update()
-            .only_if(format!(
-                "document_id = {document_id} AND deleted_at IS NULL"
-            ))
-            .column("deleted_at", "now()")
-            .column("updated_at", "now()")
-            .execute()
+        let document_id = i64_value(document_id, "document id")?;
+        self.database
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "UPDATE documents SET deleted_at = ?, updated_at = ?
+                         WHERE document_id = ? AND deleted_at IS NULL",
+                        params![timestamp(Utc::now()), timestamp(Utc::now()), document_id],
+                    )
+                    .context("soft delete document")?;
+                Ok(())
+            })
             .await
-            .context("soft delete document")?;
-        Ok(())
     }
 
     pub async fn list_deleted(&self) -> Result<Vec<Document>> {
-        let batches = self
-            .table
-            .query()
-            .only_if("deleted_at IS NOT NULL")
-            .execute()
+        self.list_where("deleted_at IS NOT NULL", "list deleted documents")
             .await
-            .context("query deleted documents")?
-            .try_collect::<Vec<_>>()
-            .await
-            .context("read deleted documents")?;
-        documents_from_batches(&batches)
     }
 
     pub async fn has_active_hash(&self, content_hash: &[u8; 32]) -> Result<bool> {
-        let literal = hash_hex(content_hash);
-        let batches = self
-            .table
-            .query()
-            .only_if(format!(
-                "content_hash = X'{literal}' AND deleted_at IS NULL"
-            ))
-            .limit(1)
-            .execute()
+        let content_hash = content_hash.to_vec();
+        self.database
+            .run(move |connection| {
+                let found: Option<i64> = connection
+                    .query_row(
+                        "SELECT document_id FROM documents
+                         WHERE content_hash = ? AND deleted_at IS NULL LIMIT 1",
+                        [content_hash],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .context("read active document hash")?;
+                Ok(found.is_some())
+            })
             .await
-            .context("query active document hash")?
-            .try_collect::<Vec<_>>()
-            .await
-            .context("read active document hash")?;
-        Ok(batches.iter().any(|batch| batch.num_rows() > 0))
     }
 
     pub async fn senders(&self) -> Result<Vec<String>> {
@@ -316,285 +341,157 @@ impl DocumentRepository {
         senders.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
         Ok(senders)
     }
-}
 
-async fn open_or_create_documents(connection: &Connection) -> Result<Table> {
-    let names = connection
-        .table_names()
-        .execute()
-        .await
-        .context("list LanceDB tables")?;
-    if names.iter().any(|name| name == DOCUMENTS_TABLE) {
-        let table = connection
-            .open_table(DOCUMENTS_TABLE)
-            .execute()
+    async fn list_where(
+        &self,
+        predicate: &'static str,
+        context: &'static str,
+    ) -> Result<Vec<Document>> {
+        self.database
+            .run(move |connection| {
+                let sql = format!(
+                    "SELECT document_id, content_hash, media_type, filename, title, sender,
+                            created_at, added_at, updated_at, title_source, sender_source,
+                            created_at_source, page_count, file_size, status, last_error,
+                            retry_count, deleted_at
+                     FROM documents WHERE {predicate}
+                     ORDER BY COALESCE(created_at, added_at) DESC, document_id DESC"
+                );
+                let mut statement = connection.prepare(&sql).context(context)?;
+                let rows = statement
+                    .query_map([], document_from_row)
+                    .context(context)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().context(context)
+            })
             .await
-            .context("open documents table")?;
-        let schema = table.schema().await?;
-        let missing = ["sender", "sender_source"]
-            .into_iter()
-            .filter(|name| schema.field_with_name(name).is_err())
-            .map(|name| Field::new(name, DataType::Utf8, true))
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            table
-                .add_columns()
-                .transform(NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))))
-                .execute()
-                .await
-                .context("add document sender columns")?;
-        }
-        let obsolete = ["document_type", "type_source"]
-            .into_iter()
-            .filter(|name| schema.field_with_name(name).is_ok())
-            .collect::<Vec<_>>();
-        if !obsolete.is_empty() {
-            table
-                .drop_columns(&obsolete)
-                .await
-                .context("drop document type columns")?;
-        }
-        Ok(table)
-    } else {
-        connection
-            .create_empty_table(DOCUMENTS_TABLE, document_schema())
-            .execute()
-            .await
-            .context("create documents table")
     }
 }
 
-async fn maximum_document_id(table: &Table) -> Result<u64> {
-    let batches = table
-        .query()
-        .execute()
-        .await
-        .context("query document ids")?
-        .try_collect::<Vec<_>>()
-        .await
-        .context("read document ids")?;
-    let documents = documents_from_batches(&batches)?;
-    Ok(documents
-        .into_iter()
-        .map(|document| document.document_id)
-        .max()
-        .unwrap_or(0))
-}
-
-pub fn document_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new("document_id", DataType::UInt64, false),
-        Field::new("content_hash", DataType::FixedSizeBinary(32), false),
-        Field::new("media_type", DataType::Utf8, false),
-        Field::new("filename", DataType::Utf8, false),
-        Field::new("title", DataType::Utf8, true),
-        Field::new("sender", DataType::Utf8, true),
-        timestamp_field("created_at", true),
-        timestamp_field("added_at", false),
-        timestamp_field("updated_at", false),
-        Field::new("title_source", DataType::Utf8, true),
-        Field::new("sender_source", DataType::Utf8, true),
-        Field::new("created_at_source", DataType::Utf8, true),
-        Field::new("page_count", DataType::UInt32, false),
-        Field::new("file_size", DataType::UInt64, false),
-        Field::new("status", DataType::Utf8, false),
-        Field::new("last_error", DataType::Utf8, true),
-        Field::new("retry_count", DataType::UInt32, false),
-        timestamp_field("deleted_at", true),
-    ]))
-}
-
-fn timestamp_field(name: &str, nullable: bool) -> Field {
-    Field::new(
-        name,
-        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-        nullable,
-    )
-}
-
-fn document_batch(document: &Document) -> Result<RecordBatch> {
-    let schema = document_schema();
-    let content_hash =
-        FixedSizeBinaryArray::try_from_iter(std::iter::once(document.content_hash.as_slice()))?;
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt64Array::from(vec![document.document_id])),
-        Arc::new(content_hash),
-        Arc::new(StringArray::from(vec![document.media_type.as_str()])),
-        Arc::new(StringArray::from(vec![document.filename.as_str()])),
-        Arc::new(StringArray::from(vec![document.title.as_deref()])),
-        Arc::new(StringArray::from(vec![document.sender.as_deref()])),
-        Arc::new(timestamp_array(document.created_at)),
-        Arc::new(timestamp_array(Some(document.added_at))),
-        Arc::new(timestamp_array(Some(document.updated_at))),
-        Arc::new(StringArray::from(vec![
-            document.title_source.map(MetadataSource::as_str),
-        ])),
-        Arc::new(StringArray::from(vec![
-            document.sender_source.map(MetadataSource::as_str),
-        ])),
-        Arc::new(StringArray::from(vec![
-            document.created_at_source.map(MetadataSource::as_str),
-        ])),
-        Arc::new(UInt32Array::from(vec![document.page_count])),
-        Arc::new(UInt64Array::from(vec![document.file_size])),
-        Arc::new(StringArray::from(vec![document.status.as_str()])),
-        Arc::new(StringArray::from(vec![document.last_error.as_deref()])),
-        Arc::new(UInt32Array::from(vec![document.retry_count])),
-        Arc::new(timestamp_array(document.deleted_at)),
-    ];
-    RecordBatch::try_new(schema, columns).context("build document record batch")
-}
-
-fn timestamp_array(value: Option<DateTime<Utc>>) -> TimestampMicrosecondArray {
-    TimestampMicrosecondArray::from(vec![value.map(|timestamp| timestamp.timestamp_micros())])
-        .with_timezone("UTC")
-}
-
-fn documents_from_batches(batches: &[RecordBatch]) -> Result<Vec<Document>> {
-    let mut documents = Vec::new();
-    for batch in batches {
-        for row in 0..batch.num_rows() {
-            documents.push(document_from_batch(batch, row)?);
-        }
-    }
-    Ok(documents)
-}
-
-fn document_from_batch(batch: &RecordBatch, row: usize) -> Result<Document> {
-    let hash = binary_column(batch, "content_hash")?.value(row);
-    let content_hash: [u8; 32] = hash
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("stored content hash has {} bytes", hash.len()))?;
+fn document_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document> {
+    let content_hash = row.get::<_, Vec<u8>>(1)?;
+    let content_hash: [u8; 32] = content_hash.try_into().map_err(|_| {
+        rusqlite::Error::InvalidColumnType(1, "content_hash".into(), rusqlite::types::Type::Blob)
+    })?;
+    let media_type = MediaType::from_str(row.get::<_, String>(2)?.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(error)),
+        )
+    })?;
+    let title_source = parse_source(row.get(9)?, 9)?;
+    let sender_source = parse_source(row.get(10)?, 10)?;
+    let created_at_source = parse_source(row.get(11)?, 11)?;
     Ok(Document {
-        document_id: u64_column(batch, "document_id")?.value(row),
+        document_id: from_i64(row.get(0)?, "document_id")?,
         content_hash,
-        media_type: MediaType::from_str(string_column(batch, "media_type")?.value(row))
-            .map_err(anyhow::Error::msg)?,
-        filename: string_column(batch, "filename")?.value(row).to_owned(),
-        title: optional_string(batch, "title", row)?,
-        sender: optional_string(batch, "sender", row)?,
-        created_at: optional_timestamp(batch, "created_at", row)?,
-        added_at: required_timestamp(batch, "added_at", row)?,
-        updated_at: required_timestamp(batch, "updated_at", row)?,
-        title_source: optional_enum(batch, "title_source", row)?,
-        sender_source: optional_enum(batch, "sender_source", row)?,
-        created_at_source: optional_enum(batch, "created_at_source", row)?,
-        page_count: u32_column(batch, "page_count")?.value(row),
-        file_size: u64_column(batch, "file_size")?.value(row),
-        status: IngestionStatus::from_str(string_column(batch, "status")?.value(row))
-            .map_err(anyhow::Error::msg)?,
-        last_error: optional_string(batch, "last_error", row)?,
-        retry_count: u32_column(batch, "retry_count")?.value(row),
-        deleted_at: optional_timestamp(batch, "deleted_at", row)?,
+        media_type,
+        filename: row.get(3)?,
+        title: row.get(4)?,
+        sender: row.get(5)?,
+        created_at: from_optional_timestamp(row.get(6)?, 6)?,
+        added_at: from_timestamp(row.get(7)?, 7)?,
+        updated_at: from_timestamp(row.get(8)?, 8)?,
+        title_source,
+        sender_source,
+        created_at_source,
+        page_count: from_i64(row.get(12)?, "page_count")? as u32,
+        file_size: from_i64(row.get(13)?, "file_size")?,
+        status: IngestionStatus::from_str(row.get::<_, String>(14)?.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                14,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(error)),
+            )
+        })?,
+        last_error: row.get(15)?,
+        retry_count: from_i64(row.get(16)?, "retry_count")? as u32,
+        deleted_at: from_optional_timestamp(row.get(17)?, 17)?,
     })
 }
 
-fn column<'a, T: Array + 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
-    batch
-        .column_by_name(name)
-        .with_context(|| format!("document batch has no {name} column"))?
-        .as_any()
-        .downcast_ref::<T>()
-        .with_context(|| format!("document column {name} has the wrong Arrow type"))
-}
-
-fn u64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt64Array> {
-    column(batch, name)
-}
-
-fn u32_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt32Array> {
-    column(batch, name)
-}
-
-fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
-    column(batch, name)
-}
-
-fn binary_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a FixedSizeBinaryArray> {
-    column(batch, name)
-}
-
-fn optional_string(batch: &RecordBatch, name: &str, row: usize) -> Result<Option<String>> {
-    let values = string_column(batch, name)?;
-    Ok((!values.is_null(row)).then(|| values.value(row).to_owned()))
-}
-
-fn optional_enum<T>(batch: &RecordBatch, name: &str, row: usize) -> Result<Option<T>>
-where
-    T: FromStr<Err = String>,
-{
-    optional_string(batch, name, row)?
-        .map(|value| T::from_str(&value).map_err(anyhow::Error::msg))
+fn parse_source(value: Option<String>, index: usize) -> rusqlite::Result<Option<MetadataSource>> {
+    value
+        .map(|value| {
+            MetadataSource::from_str(&value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(error)),
+                )
+            })
+        })
         .transpose()
 }
 
-fn optional_timestamp(
-    batch: &RecordBatch,
-    name: &str,
-    row: usize,
-) -> Result<Option<DateTime<Utc>>> {
-    let values: &TimestampMicrosecondArray = column(batch, name)?;
-    if values.is_null(row) {
-        return Ok(None);
-    }
-    DateTime::from_timestamp_micros(values.value(row))
-        .with_context(|| format!("document column {name} has an invalid timestamp"))
-        .map(Some)
+fn timestamp(value: DateTime<Utc>) -> i64 {
+    value.timestamp_micros()
 }
 
-fn required_timestamp(batch: &RecordBatch, name: &str, row: usize) -> Result<DateTime<Utc>> {
-    optional_timestamp(batch, name, row)?.with_context(|| format!("document column {name} is null"))
+fn optional_timestamp(value: Option<DateTime<Utc>>) -> Option<i64> {
+    value.map(timestamp)
 }
 
-fn sql_string(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+fn optional_source(value: Option<MetadataSource>) -> Option<&'static str> {
+    value.map(MetadataSource::as_str)
 }
 
-fn sql_optional_string(value: Option<&str>) -> String {
-    value.map_or_else(|| "NULL".into(), sql_string)
+fn i64_value(value: u64, field: &str) -> Result<i64> {
+    i64::try_from(value).with_context(|| format!("{field} exceeds SQLite integer range"))
 }
 
-fn sql_optional_source(value: Option<MetadataSource>) -> String {
-    value.map_or_else(|| "NULL".into(), |source| sql_string(source.as_str()))
+fn from_i64(value: i64, field: &str) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::other(format!("{field} is negative"))),
+        )
+    })
 }
 
-fn sql_optional_timestamp(value: Option<DateTime<Utc>>) -> String {
-    value.map_or_else(
-        || "NULL".into(),
-        |date| {
-            format!(
-                "arrow_cast({}, 'Timestamp(Microsecond, Some(\"UTC\"))')",
-                date.timestamp_micros()
-            )
-        },
-    )
+fn from_timestamp(value: i64, index: usize) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::from_timestamp_micros(value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::other("invalid timestamp")),
+        )
+    })
+}
+
+fn from_optional_timestamp(
+    value: Option<i64>,
+    index: usize,
+) -> rusqlite::Result<Option<DateTime<Utc>>> {
+    value.map(|value| from_timestamp(value, index)).transpose()
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
-    use paperless_models::{Document, IngestionStatus, MediaType, UploadMetadata};
+    use chrono::Utc;
+    use paperless_models::{Document, IngestionStatus, MediaType};
 
     use super::DocumentRepository;
-    use crate::layout::DataLayout;
+    use crate::DataLayout;
 
-    fn document(id: u64, hash_byte: u8) -> Document {
-        let added_at = Utc.with_ymd_and_hms(2026, 8, 1, 12, 0, 0).unwrap();
+    fn document(id: u64, page_count: u32) -> Document {
+        let now = Utc::now();
         Document {
             document_id: id,
-            content_hash: [hash_byte; 32],
+            content_hash: [id as u8; 32],
             media_type: MediaType::Pdf,
-            filename: format!("document-{id}.pdf"),
+            filename: format!("{id}.pdf"),
             title: None,
             sender: None,
             created_at: None,
-            added_at,
-            updated_at: added_at,
+            added_at: now,
+            updated_at: now,
             title_source: None,
             sender_source: None,
             created_at_source: None,
-            page_count: 0,
-            file_size: 12,
+            page_count,
+            file_size: 42,
             status: IngestionStatus::Stored,
             last_error: None,
             retry_count: 0,
@@ -603,49 +500,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persists_reads_and_orders_documents() {
+    async fn persists_documents_across_reopen_and_allocates_after_maximum() {
         let temporary = tempfile::tempdir().unwrap();
         let layout = DataLayout::create(temporary.path()).await.unwrap();
         let repository = DocumentRepository::open(&layout).await.unwrap();
-        let mut older_document_date = document(repository.allocate_id(), 1);
-        older_document_date.created_at = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).single();
-        let mut newer_added_date = document(repository.allocate_id(), 2);
-        newer_added_date.added_at = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-        repository.insert(&older_document_date).await.unwrap();
-        repository.insert(&newer_added_date).await.unwrap();
-
+        repository.insert(&document(7, 2)).await.unwrap();
+        assert_eq!(repository.get(7).await.unwrap().unwrap().filename, "7.pdf");
         let reopened = DocumentRepository::open(&layout).await.unwrap();
-        assert_eq!(
-            reopened.get(older_document_date.document_id).await.unwrap(),
-            Some(older_document_date)
-        );
-        assert_eq!(
-            reopened.find_by_hash(&[2; 32]).await.unwrap(),
-            Some(newer_added_date.clone())
-        );
-        let listed = reopened.list_active().await.unwrap();
-        assert_eq!(listed[0].document_id, newer_added_date.document_id);
-        assert!(reopened.allocate_id() > newer_added_date.document_id);
+        assert_eq!(reopened.allocate_id(), 8);
     }
 
     #[tokio::test]
-    async fn duplicate_metadata_only_fills_empty_fields() {
+    async fn active_hashes_are_unique_but_deleted_hashes_can_return() {
         let temporary = tempfile::tempdir().unwrap();
         let layout = DataLayout::create(temporary.path()).await.unwrap();
         let repository = DocumentRepository::open(&layout).await.unwrap();
-        let mut existing = document(repository.allocate_id(), 3);
-        existing.title = Some("Manual title".into());
-        repository.insert(&existing).await.unwrap();
-        let metadata = UploadMetadata {
-            filename: "duplicate.pdf".into(),
-            title: Some("Replacement title".into()),
-            created_at: None,
-        };
-
-        let merged = repository
-            .merge_missing_upload_metadata(&existing, &metadata)
-            .await
-            .unwrap();
-        assert_eq!(merged.title.as_deref(), Some("Manual title"));
+        repository.insert(&document(1, 1)).await.unwrap();
+        assert!(repository.has_active_hash(&[1; 32]).await.unwrap());
+        repository.soft_delete(1).await.unwrap();
+        assert!(!repository.has_active_hash(&[1; 32]).await.unwrap());
+        assert_eq!(repository.list_deleted().await.unwrap().len(), 1);
     }
 }

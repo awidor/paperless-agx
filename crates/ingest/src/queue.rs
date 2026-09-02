@@ -9,8 +9,7 @@ use chrono::Utc;
 use paperless_embeddings::EmbeddingService;
 use paperless_models::{Document, DocumentPage, IngestionStatus};
 use paperless_ocr_client::{OcrClient, is_transient_request_failure};
-use paperless_search::ChunkRepository;
-use paperless_storage::{DocumentRepository, PageRepository};
+use paperless_storage::{ChunkRepository, DocumentRepository, PageRepository};
 use tokio::sync::{Notify, Semaphore};
 use tracing::{error, warn};
 

@@ -13,8 +13,9 @@ use paperless_embeddings::EmbeddingService;
 use paperless_ingest::{CleanupQueue, IngestionQueue, MetadataService, PreviewService};
 use paperless_models::IngestionStatus;
 use paperless_ocr_client::OcrClient;
-use paperless_search::ChunkRepository;
-use paperless_storage::{DataLayout, DocumentRepository, ObjectStore, PageRepository};
+use paperless_storage::{
+    ChunkRepository, DataLayout, DocumentRepository, ObjectStore, PageRepository,
+};
 use tokio::sync::Mutex;
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -46,7 +47,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
     let layout = DataLayout::create(&config.data_dir).await?;
     let documents = DocumentRepository::open(&layout).await?;
     let pages = PageRepository::open(&layout).await?;
-    let chunks = ChunkRepository::open(&layout.lance).await?;
+    let chunks = ChunkRepository::open(&layout).await?;
     for document_id in pages.documents_missing_layout().await? {
         let Some(document) = documents.get(document_id).await? else {
             continue;
@@ -73,9 +74,12 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         config.ocr.pages_per_request,
     )?;
     let embeddings = match &config.embeddings {
-        Some(embedding) => {
-            Some(EmbeddingService::load(&embedding.model_dir, embedding.max_concurrency).await?)
-        }
+        Some(embedding) => Some(EmbeddingService::from_environment(
+            embedding.base_url.as_str(),
+            embedding.model.clone(),
+            &embedding.api_key_env,
+            embedding.max_concurrency,
+        )?),
         None => None,
     };
     let ocr = OcrClient::from_environment(config.ocr, config.llm)?;

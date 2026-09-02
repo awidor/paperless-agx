@@ -7,13 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-arrow-array.workspace = true
-arrow-schema.workspace = true
 blake3.workspace = true
 chrono.workspace = true
-futures.workspace = true
-lancedb.workspace = true
 paperless-models = { path = "../models" }
+rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

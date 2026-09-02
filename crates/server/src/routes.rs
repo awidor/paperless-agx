@@ -20,7 +20,7 @@ use paperless_models::{
     SearchResponse, UploadMetadata,
 };
 use paperless_search::{RankedChunk, collapse_to_documents, reciprocal_rank_fusion};
-use paperless_storage::StoredObject;
+use paperless_storage::{ChunkMatch, SearchFilter, StoredObject};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -264,13 +264,13 @@ pub async fn search(
     let filter = search_filter(&effective_request);
     let lexical = state
         .chunks
-        .lexical_candidates(&request.query, filter.as_deref(), 50)
+        .lexical_candidates(&request.query, filter.clone(), 50)
         .await?;
     let vector = state
         .chunks
-        .vector_candidates(&query_embedding, filter.as_deref(), 50)
+        .vector_candidates(&query_embedding, filter, 50)
         .await?;
-    let ranked = |matches: Vec<paperless_search::ChunkMatch>| {
+    let ranked = |matches: Vec<ChunkMatch>| {
         matches
             .into_iter()
             .map(|candidate| RankedChunk {
@@ -605,24 +605,12 @@ fn metadata_matches(document: &Document, query: &str) -> bool {
         })
 }
 
-fn search_filter(request: &SearchRequest) -> Option<String> {
-    let mut filters = Vec::new();
-    if let Some(sender) = request.sender.as_deref() {
-        filters.push(format!("sender = '{}'", sender.replace('\'', "''")));
+fn search_filter(request: &SearchRequest) -> SearchFilter {
+    SearchFilter {
+        sender: request.sender.clone(),
+        created_from: request.created_from,
+        created_to: request.created_to,
     }
-    if let Some(created_from) = request.created_from {
-        filters.push(format!(
-            "created_at >= to_timestamp_micros({})",
-            created_from.timestamp_micros()
-        ));
-    }
-    if let Some(created_to) = request.created_to {
-        filters.push(format!(
-            "created_at <= to_timestamp_micros({})",
-            created_to.timestamp_micros()
-        ));
-    }
-    (!filters.is_empty()).then(|| filters.join(" AND "))
 }
 
 fn infer_search_interpretation(

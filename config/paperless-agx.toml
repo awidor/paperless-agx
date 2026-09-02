@@ -5,7 +5,9 @@ render_concurrency = 2
 eager_thumbnail_pages = 3
 
 [embeddings]
-model_dir = "data/models/harrier-oss-v1-0.6b"
+base_url = "http://127.0.0.1:8765/v1"
+model = "harrier"
+api_key_env = "OCR_API_KEY"
 max_concurrency = 1
 
 [ocr]

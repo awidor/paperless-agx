@@ -13,7 +13,6 @@ image.workspace = true
 paperless-models = { path = "../models" }
 paperless-ocr-client = { path = "../ocr-client" }
 paperless-storage = { path = "../storage" }
-paperless-search = { path = "../search" }
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true

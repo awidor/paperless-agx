@@ -8,12 +8,6 @@ COPY openapi.json /src/openapi.json
 COPY web/ ./
 RUN bun run build
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS model
-WORKDIR /src
-COPY scripts/download_harrier.py ./
-RUN uv run --with huggingface-hub==0.36.0 python download_harrier.py \
-    --output /models/harrier-oss-v1-0.6b
-
 FROM rust:1.96-bookworm AS server
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential clang cmake pkg-config libssl-dev libprotobuf-dev protobuf-compiler \
@@ -33,8 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/paperless
 COPY --from=server /usr/local/bin/paperless-server /usr/local/bin/paperless-server
-COPY --from=web /src/web/dist ./web/dist
-COPY --from=model /models ./models
 COPY config/paperless-agx.docker.toml ./config/paperless-agx.toml
 RUN useradd --system --uid 10001 --home /nonexistent --shell /usr/sbin/nologin paperless \
     && mkdir -p /data \

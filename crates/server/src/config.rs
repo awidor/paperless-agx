@@ -6,10 +6,13 @@ use std::{
 use anyhow::{Context, Result, bail};
 use paperless_ocr_client::{LlmConfig, OcrConfig};
 use serde::Deserialize;
+use url::Url;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EmbeddingConfig {
-    pub model_dir: PathBuf,
+    pub base_url: Url,
+    pub model: String,
+    pub api_key_env: String,
     pub max_concurrency: usize,
 }
 
@@ -47,12 +50,16 @@ impl AppConfig {
         }
         self.ocr.check()?;
         self.llm.check()?;
-        if self
-            .embeddings
-            .as_ref()
-            .is_some_and(|embedding| embedding.max_concurrency == 0)
-        {
-            bail!("embedding max_concurrency must be greater than zero");
+        if let Some(embedding) = &self.embeddings {
+            if embedding.model.trim().is_empty() {
+                bail!("embedding.model must not be empty");
+            }
+            if embedding.api_key_env.trim().is_empty() {
+                bail!("embedding.api_key_env must not be empty");
+            }
+            if embedding.max_concurrency == 0 {
+                bail!("embedding max_concurrency must be greater than zero");
+            }
         }
         Ok(())
     }
@@ -75,6 +82,11 @@ queue_capacity = 16
 render_concurrency = 2
 eager_thumbnail_pages = 3
 
+[embeddings]
+base_url = "http://127.0.0.1:8765/v1"
+model = "harrier"
+api_key_env = "OCR_API_KEY"
+max_concurrency = 1
 [ocr]
 base_url = "http://127.0.0.1:8765/v1"
 model = "chandra"
@@ -88,12 +100,21 @@ base_url = "https://openrouter.ai/api/v1"
 model = "z-ai/glm-5.3-flash"
 api_key_env = "OPENROUTER_API_KEY"
 max_concurrency = 1
-"#,
+            "#,
         )
         .await
         .unwrap();
         let config = AppConfig::load(path).await.unwrap();
-        assert_eq!(config.listen_addr.to_string(), "0.0.0.0:3000");
+        assert_eq!(
+            config.embeddings.as_ref().unwrap().base_url.as_str(),
+            "http://127.0.0.1:8765/v1"
+        );
+        assert_eq!(config.embeddings.as_ref().unwrap().model, "harrier");
+        assert_eq!(
+            config.embeddings.as_ref().unwrap().api_key_env,
+            "OCR_API_KEY"
+        );
+        assert_eq!(config.embeddings.as_ref().unwrap().max_concurrency, 1);
         assert_eq!(config.ocr.pages_per_request, 2);
         assert_eq!(config.ocr.model, "chandra");
         assert_eq!(config.ocr.max_output_tokens, 24_576);

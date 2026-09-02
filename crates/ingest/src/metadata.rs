@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use paperless_models::{Document, DocumentPatch, InferredMetadata, MetadataSource};
-use paperless_search::ChunkRepository;
-use paperless_storage::DocumentRepository;
+use paperless_storage::{ChunkRepository, DocumentRepository};
 
 #[derive(Clone)]
 pub struct MetadataService {
@@ -104,8 +103,7 @@ mod tests {
         Chunk, Document, DocumentPatch, InferredMetadata, IngestionStatus, MediaType,
         MetadataSource,
     };
-    use paperless_search::ChunkRepository;
-    use paperless_storage::{DataLayout, DocumentRepository};
+    use paperless_storage::{ChunkRepository, DataLayout, DocumentRepository};
 
     use super::MetadataService;
 
@@ -114,7 +112,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let layout = DataLayout::create(temporary.path()).await.unwrap();
         let documents = DocumentRepository::open(&layout).await.unwrap();
-        let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
+        let chunks = ChunkRepository::open(&layout).await.unwrap();
         let now = Utc::now();
         let document = Document {
             document_id: 1,
@@ -189,7 +187,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let layout = DataLayout::create(temporary.path()).await.unwrap();
         let documents = DocumentRepository::open(&layout).await.unwrap();
-        let chunks = ChunkRepository::open(&layout.lance).await.unwrap();
+        let chunks = ChunkRepository::open(&layout).await.unwrap();
         let now = Utc::now();
         let document = Document {
             document_id: 1,

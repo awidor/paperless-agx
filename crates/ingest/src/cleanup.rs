@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
-use paperless_search::ChunkRepository;
-use paperless_storage::{DataLayout, DocumentRepository, ObjectStore, PageRepository};
+use paperless_storage::{
+    ChunkRepository, DataLayout, DocumentRepository, ObjectStore, PageRepository,
+};
 use tokio::sync::{Semaphore, mpsc};
 use tracing::error;
 
