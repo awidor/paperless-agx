@@ -15,7 +15,7 @@ api_key_env = "OCR_API_KEY"
 # Match the two llama.cpp slots on the Proxmox Chandra server.
 max_concurrency = 2
 pages_per_request = 2
-max_output_tokens = 12384
+max_output_tokens = 24576
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"

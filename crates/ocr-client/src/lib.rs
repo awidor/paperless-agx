@@ -956,7 +956,7 @@ mod tests {
                 api_key_env: key_name.into(),
                 max_concurrency: 2,
                 pages_per_request,
-                max_output_tokens: 12_384,
+                max_output_tokens: 24_576,
             },
             LlmConfig {
                 base_url: Url::parse("https://openrouter.ai/api/v1").unwrap(),
@@ -1009,7 +1009,7 @@ mod tests {
         let body: Value =
             serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
         assert_eq!(body["model"], "chandra");
-        assert_eq!(body["max_tokens"], 12_384);
+        assert_eq!(body["max_tokens"], 24_576);
         assert_eq!(
             body["messages"][0]["content"][0]["image_url"]["url"],
             "data:image/png;base64,AQID"
@@ -1303,7 +1303,7 @@ mod tests {
         let page = parse_page_response(
             3,
             br#"{"choices":[{"message":{"content":"<div data-label=\"SectionHeader\" data-bbox=\"0 0 1000 100\"><h1>Title</h1></div><div data-label=\"Text\" data-bbox=\"0 100 1000 200\"><p>Body text</p></div><div data-label=\"Figure\" data-bbox=\"0 200 1000 800\"><img alt=\"Revenue chart\"><p>Revenue rises each year.</p></div>"}}]}"#,
-            12_384,
+            24_576,
         )
         .unwrap();
         assert_eq!(page.page, 3);
