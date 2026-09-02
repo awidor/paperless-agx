@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/paperless
 COPY --from=server /usr/local/bin/paperless-server /usr/local/bin/paperless-server
+COPY --from=web /src/web/dist ./web/dist
 COPY config/paperless-agx.docker.toml ./config/paperless-agx.toml
 RUN useradd --system --uid 10001 --home /nonexistent --shell /usr/sbin/nologin paperless \
     && mkdir -p /data \
