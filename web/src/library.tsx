@@ -45,8 +45,8 @@ export function DocumentCard({ document, hit, terms, onOpen, onFilterSender }: {
     <div className="thumbnail-wrap"><img key={document.status} src={`/api/documents/${document.document_id}/thumbnails/1`} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} /></div>
     <div className="card-body">
       {sender && <p className="card-sender"><button className="card-sender-filter" title={`Filter by ${sender}`} onClick={() => onFilterSender(sender)}>{sender}</button></p>}
-      <div className="card-title-row"><h3>{name}</h3><span className="card-size">{formatBytes(document.file_size)}</span></div>
-      <p className="card-meta">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(date))}</p>
+      <div className="card-title-row"><h3>{name}</h3></div>
+      <p className="card-meta"><span>{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(date))}</span><span className="card-size">{formatBytes(document.file_size)}</span></p>
       {document.status !== "READY" && <p className="card-status"><span className={`status status-${document.status.toLowerCase()}`}>{document.status.toLowerCase().replaceAll("_", " ")}</span></p>}
       {hit && <p className="snippet"><Marked text={hit.snippet} terms={terms} /></p>}
       {document.last_error && <p className="card-error">{document.last_error}</p>}

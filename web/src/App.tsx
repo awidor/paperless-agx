@@ -25,6 +25,7 @@ import {
 import { DocumentDetail } from "./DocumentDetail";
 import { DocumentCard, FilterPanel, initialQuery } from "./library";
 import { SearchWorkspace, type SearchResult } from "./SearchWorkspace";
+import { ThemeControl } from "./ThemeControl";
 
 type View = "grid" | "list";
 type UploadState = {
@@ -472,12 +473,15 @@ export default function App() {
             <button type="button" className="clear-search" onClick={clearSearch}><X size={15} /> Clear</button>
           ) : null}
         </form>
-        {health && !(health.ocr_configured && health.embedding_configured) && (
-          <div className="health-pill" title={`OCR: ${health.ocr_model}\nEmbeddings: ${health.embedding_model}`}>
-            <span className="health-dot" />
-            Models not ready
-          </div>
-        )}
+        <div className="topbar-actions">
+          {health && !(health.ocr_configured && health.embedding_configured) && (
+            <div className="health-pill" title={`OCR: ${health.ocr_model}\nEmbeddings: ${health.embedding_model}`}>
+              <span className="health-dot" />
+              Models not ready
+            </div>
+          )}
+          <ThemeControl />
+        </div>
       </header>
 
       <main>
@@ -485,7 +489,7 @@ export default function App() {
         {uploadState && <div className={`upload-banner${uploadState.failures.length ? " has-errors" : ""}`} role={uploadState.failures.length && !uploadState.active ? "alert" : "status"}><span>{uploadMessage}</span>{!uploadState.active && <button onClick={() => setUploadState(null)} aria-label="Dismiss upload status"><X size={16} /></button>}</div>}
 
         <section className="library-toolbar">
-          <div>
+          <div className="library-heading">
             <h2>{searching ? "Search results" : "Library"}</h2>
             <span className="toolbar-count" aria-live="polite">
               {searching

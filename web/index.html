@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#fafaf9" />
+    <script>
+      // Apply the saved preference before styles load to avoid a light flash.
+      let theme;
+      try { theme = localStorage.getItem("paperless-agx-theme"); } catch {}
+      const dark = theme === "dark" || (theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+      document.querySelector('meta[name="theme-color"]').content = dark ? "#181818" : "#fafaf9";
+    </script>
     <title>Paperless AGX</title>
   </head>
   <body>
