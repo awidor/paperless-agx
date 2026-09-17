@@ -1,7 +1,12 @@
 /target
 /data
-/.env
+.env
+.env.*
+!.env.example
 *.local.toml
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 .DS_Store
 __pycache__/
 *.pyc

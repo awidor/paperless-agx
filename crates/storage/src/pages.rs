@@ -243,7 +243,8 @@ mod tests {
                 "<div data-label=\"Text\" data-bbox=\"10 20 900 120\"><p>replacement</p></div>"
                     .into(),
             ),
-            updated_at: Utc::now(),
+            updated_at: chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+                .unwrap(),
         }];
         repository
             .replace_document_pages(7, replacement.clone())

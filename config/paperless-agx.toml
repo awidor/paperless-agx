@@ -1,5 +1,5 @@
 data_dir = "data"
-listen_addr = "0.0.0.0:3000"
+listen_addr = "127.0.0.1:3000"
 queue_capacity = 16
 render_concurrency = 2
 eager_thumbnail_pages = 3
@@ -14,7 +14,7 @@ max_concurrency = 1
 base_url = "http://127.0.0.1:8765/v1"
 model = "chandra"
 api_key_env = "OCR_API_KEY"
-# Match the two llama.cpp slots on the Proxmox Chandra server.
+# Match the two Chandra slots in the example llama.cpp router profile.
 max_concurrency = 2
 pages_per_request = 2
 max_output_tokens = 24576

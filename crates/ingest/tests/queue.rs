@@ -320,7 +320,10 @@ async fn wait_for_status(
 }
 
 async fn wait_for_attempts(attempts: &AtomicUsize, expected: usize) {
-    for _ in 0..1_000 {
+    // The Tokio clock is paused, but SQLite and socket I/O use real time.
+    // A fixed number of yields can finish before that I/O completes.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         if attempts.load(Ordering::SeqCst) >= expected {
             return;
         }

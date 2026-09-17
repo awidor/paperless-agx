@@ -1,6 +1,12 @@
 .git
-.agents
 target
 web/node_modules
 web/dist
 data
+.env
+.env.*
+!.env.example
+**/*.local.toml
+**/*.sqlite*
+web/test-results
+web/playwright-report

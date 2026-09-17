@@ -5,7 +5,11 @@ services:
     restart: unless-stopped
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OCR_API_KEY: ${OCR_API_KEY:-EMPTY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
       - ./data:/data
+      - ./config/paperless-agx.docker.toml:/opt/paperless/config/paperless-agx.toml:ro

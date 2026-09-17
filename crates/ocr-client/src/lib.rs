@@ -13,6 +13,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
 use url::Url;
 
+// Chandra OCR layout prompt: Copyright 2025 Endless Labs, Inc.
+// Apache-2.0; see licenses/chandra.txt and github.com/datalab-to/chandra.
 const CHANDRA_OCR_LAYOUT_PROMPT: &str = r#"OCR this image to HTML, arranged as layout blocks.  Each layout block should be a div with the data-bbox attribute representing the bounding box of the block in x0 y0 x1 y1 format.  Bboxes are normalized 0-1000. The data-label attribute is the label for the block.
 
 Use the following labels:
