@@ -60,6 +60,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const OCR_RETRIES: u32 = 3;
 const METADATA_REQUEST_ATTEMPTS: usize = 5;
 const MAX_RETRY_AFTER_SECONDS: u64 = 30;
+/// Room for high-effort reasoning plus the JSON reply with its summary.
+const METADATA_MAX_TOKENS: u32 = 4_096;
 const METADATA_PROMPT: &str = "Extract metadata from the OCR text.\nReturn only a JSON object with nullable string fields title, sender, created_at, and summary.\nUse a concise, human-readable title in the document's language. Do not copy the first line as the title.\nSet sender to the company or person that issued or sent the document. Write the same sender with exactly the same wording in every document. Use null when the sender is not stated or unclear; do not guess.\nSet created_at to the date stated in the document, such as the letter date or invoice date. Never use a scan date or print timestamp.\nUse YYYY-MM-DD for created_at.\nSet summary to two or three sentences in the document's language that say what kind of document it is, what it is about, and the facts someone would later search for: amounts, deadlines, periods, and contract, customer, or reference numbers. Use only facts stated in the text.";
 const KNOWN_SENDERS_LIMIT: usize = 100;
 /// Which OCR model family the endpoint serves; decides the prompt and output format.
@@ -330,7 +332,7 @@ impl OcrClient {
         let senders_block = known_senders_block(known_senders);
         let body = ChatRequest {
             model: self.metadata.model.clone(),
-            max_tokens: 2_048,
+            max_tokens: METADATA_MAX_TOKENS,
             temperature: 0.0,
             top_p: 0.1,
             messages: vec![ChatMessage {
@@ -633,10 +635,14 @@ struct RawMetadata {
 fn parse_metadata_response(body: &[u8]) -> Result<InferredMetadata> {
     let response: ChatResponse =
         serde_json::from_slice(body).context("parse metadata JSON response")?;
-    let content = response
+    let choice = response
         .choices
         .first()
-        .context("metadata response has no choices")?
+        .context("metadata response has no choices")?;
+    if choice.finish_reason.as_deref() == Some("length") {
+        bail!("metadata response hit the {METADATA_MAX_TOKENS}-token output limit and is cut off");
+    }
+    let content = choice
         .message
         .content
         .as_deref()
