@@ -83,7 +83,7 @@ test("rejects unknown documents, then returns checked results with archive text"
     call("submit_results", { results: [result(99, {})], answer: "212,50 Euro", answer_citations: [0] }),
     call("submit_results", {
       results: [result(7, { passage_id: passage.chunk_id })],
-      answer: "212,50 Euro im Monat",
+      answer: "**212,50 Euro** im Monat",
       answer_citations: [0],
     }),
   ]);

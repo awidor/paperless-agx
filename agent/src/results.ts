@@ -56,7 +56,7 @@ export function checkSubmission(
     position.set(index, results.length);
     results.push({
       documentId: item.document_id,
-      reason: item.reason.trim().slice(0, 400),
+      reason: plain(item.reason).slice(0, 400),
       passage: evidence(context, item, Math.max(document.page_count, 1)),
     });
   });
@@ -68,10 +68,19 @@ export function checkSubmission(
         .filter((index): index is number => index !== undefined),
     ),
   ];
-  const answer = submission.answer?.trim() || null;
+  const answer = submission.answer ? plain(submission.answer) || null : null;
   return answer && citations.length > 0
     ? { answer, citations, results }
     : { answer: null, citations: [], results };
+}
+
+/** The page shows answers and reasons as text, so Markdown emphasis would appear literally. */
+function plain(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .trim();
 }
 
 function evidence(context: RunContext, item: SubmittedItem, pageCount: number): SearchPassage {
