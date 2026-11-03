@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use paperless_embeddings::EmbeddingService;
 use paperless_storage::ChunkRepository;
 
-/// Chunks embedded per round trip; Gemini's batch endpoint takes up to 100 inputs.
+/// Chunks listed and stored per round; the embedding service bounds its own concurrency.
 const REEMBED_BATCH: usize = 100;
 
 /// Embeds every stored chunk that has no vector for the configured model, for example after

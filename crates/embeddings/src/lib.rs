@@ -6,9 +6,6 @@ use tokio::sync::Semaphore;
 
 pub use paperless_models::EMBEDDING_DIMENSION;
 
-/// Inputs per embeddings request.
-const MAX_BATCH_INPUTS: usize = 100;
-
 /// Asymmetric retrieval prompt for search queries, as documented for `gemini-embedding-2`.
 pub fn query_input(query: &str) -> String {
     format!("task: search result | query: {query}")
@@ -103,18 +100,14 @@ impl EmbeddingService {
             .context("embedding service returned no query embedding")
     }
 
+    /// Sends one input per request: OpenRouter only routes batched `gemini-embedding-2`
+    /// requests to Google AI Studio, which the zero-data-retention policy excludes, while
+    /// single inputs reach Google Vertex. The gate bounds how many run at once.
     async fn embed_inputs(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        let mut vectors = Vec::with_capacity(inputs.len());
-        for batch in inputs.chunks(MAX_BATCH_INPUTS) {
-            vectors.extend(self.embed_batch(batch).await?);
-        }
-        Ok(vectors)
+        futures::future::try_join_all(inputs.iter().map(|input| self.embed_one(input))).await
     }
 
-    async fn embed_batch(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
-        if inputs.is_empty() {
-            return Ok(Vec::new());
-        }
+    async fn embed_one(&self, input: &str) -> Result<Vec<f32>> {
         let _permit = self
             .gate
             .clone()
@@ -123,7 +116,7 @@ impl EmbeddingService {
             .context("embedding gate closed")?;
         let request = EmbeddingRequest {
             model: &self.model,
-            input: inputs,
+            input,
             encoding_format: "float",
             provider: ProviderPreferences {
                 zdr: true,
@@ -143,28 +136,22 @@ impl EmbeddingService {
         if !status.is_success() {
             bail!("embedding request failed with {status}: {body}");
         }
-        let mut result: EmbeddingResponse =
+        let result: EmbeddingResponse =
             serde_json::from_str(&body).context("parse embedding response")?;
-        result.data.sort_by_key(|item| item.index);
-        if result.data.len() != inputs.len() {
-            bail!(
-                "embedding service returned {} embeddings for {} inputs",
-                result.data.len(),
-                inputs.len()
-            );
-        }
-        result
-            .data
-            .into_iter()
-            .map(|item| normalize_embedding(item.embedding))
-            .collect()
+        let [item] = <[EmbeddingItem; 1]>::try_from(result.data).map_err(|data| {
+            anyhow::anyhow!(
+                "embedding service returned {} embeddings for one input",
+                data.len()
+            )
+        })?;
+        normalize_embedding(item.embedding)
     }
 }
 
 #[derive(Debug, Serialize)]
 struct EmbeddingRequest<'a> {
     model: &'a str,
-    input: &'a [String],
+    input: &'a str,
     encoding_format: &'static str,
     provider: ProviderPreferences,
 }
@@ -185,7 +172,6 @@ struct EmbeddingResponse {
 #[derive(Debug, Deserialize)]
 struct EmbeddingItem {
     embedding: Vec<f32>,
-    index: usize,
 }
 
 fn normalize_embedding(embedding: Vec<f32>) -> Result<Vec<f32>> {

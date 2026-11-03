@@ -103,12 +103,12 @@ async fn start_ocr_with_text(text: String) -> Url {
             post(|Json(body): Json<serde_json::Value>| async move {
                 assert_eq!(body["provider"]["zdr"], true);
                 assert_eq!(body["provider"]["data_collection"], "deny");
-                let count = body["input"].as_array().map_or(0, Vec::len);
+                assert!(body["input"].is_string(), "one input per request");
                 let values = vec![1.0_f32; paperless_models::EMBEDDING_DIMENSION];
-                let data = (0..count)
-                    .map(|index| serde_json::json!({ "embedding": values.clone(), "index": index }))
-                    .collect::<Vec<_>>();
-                Json(serde_json::json!({ "object": "list", "data": data }))
+                Json(serde_json::json!({
+                    "object": "list",
+                    "data": [{ "embedding": values, "index": 0 }]
+                }))
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
