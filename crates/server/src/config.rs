@@ -83,9 +83,9 @@ render_concurrency = 2
 eager_thumbnail_pages = 3
 
 [embeddings]
-base_url = "https://generativelanguage.googleapis.com/v1beta"
-model = "gemini-embedding-2"
-api_key_env = "GEMINI_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemini-embedding-2"
+api_key_env = "OPENROUTER_API_KEY"
 max_concurrency = 2
 [ocr]
 base_url = "http://127.0.0.1:8765/v1"
@@ -107,15 +107,15 @@ max_concurrency = 1
         let config = AppConfig::load(path).await.unwrap();
         assert_eq!(
             config.embeddings.as_ref().unwrap().base_url.as_str(),
-            "https://generativelanguage.googleapis.com/v1beta"
+            "https://openrouter.ai/api/v1"
         );
         assert_eq!(
             config.embeddings.as_ref().unwrap().model,
-            "gemini-embedding-2"
+            "google/gemini-embedding-2"
         );
         assert_eq!(
             config.embeddings.as_ref().unwrap().api_key_env,
-            "GEMINI_API_KEY"
+            "OPENROUTER_API_KEY"
         );
         assert_eq!(config.embeddings.as_ref().unwrap().max_concurrency, 2);
         assert_eq!(config.ocr.pages_per_request, 2);

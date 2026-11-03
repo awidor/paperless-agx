@@ -6,7 +6,7 @@ use tokio::sync::Semaphore;
 
 pub use paperless_models::EMBEDDING_DIMENSION;
 
-/// Gemini accepts at most 100 requests in one `batchEmbedContents` call.
+/// Inputs per embeddings request.
 const MAX_BATCH_INPUTS: usize = 100;
 
 /// Asymmetric retrieval prompt for search queries, as documented for `gemini-embedding-2`.
@@ -28,7 +28,6 @@ pub struct EmbeddingService {
     client: reqwest::Client,
     endpoint: Arc<str>,
     model: Arc<str>,
-    model_resource: Arc<str>,
     api_key: Arc<str>,
     gate: Arc<Semaphore>,
 }
@@ -61,15 +60,13 @@ impl EmbeddingService {
         if base_url.is_empty() {
             bail!("embedding base_url must not be empty");
         }
-        let model = model.into();
-        let model = model.trim().trim_start_matches("models/").to_owned();
+        let model = model.into().trim().to_owned();
         if model.is_empty() {
             bail!("embedding model must not be empty");
         }
         Ok(Self {
             client: reqwest::Client::new(),
-            endpoint: Arc::from(format!("{base_url}/models/{model}:batchEmbedContents")),
-            model_resource: Arc::from(format!("models/{model}")),
+            endpoint: Arc::from(format!("{base_url}/embeddings")),
             model: Arc::from(model),
             api_key: Arc::from(api_key.into()),
             gate: Arc::new(Semaphore::new(max_concurrency)),
@@ -124,22 +121,19 @@ impl EmbeddingService {
             .acquire_owned()
             .await
             .context("embedding gate closed")?;
-        let request = BatchEmbedRequest {
-            requests: inputs
-                .iter()
-                .map(|text| EmbedRequest {
-                    model: &self.model_resource,
-                    content: Content {
-                        parts: vec![Part { text }],
-                    },
-                    output_dimensionality: EMBEDDING_DIMENSION,
-                })
-                .collect(),
+        let request = EmbeddingRequest {
+            model: &self.model,
+            input: inputs,
+            encoding_format: "float",
+            provider: ProviderPreferences {
+                zdr: true,
+                data_collection: "deny",
+            },
         };
         let response = self
             .client
             .post(self.endpoint.as_ref())
-            .header("x-goog-api-key", self.api_key.as_ref())
+            .bearer_auth(self.api_key.as_ref())
             .json(&request)
             .send()
             .await
@@ -149,55 +143,49 @@ impl EmbeddingService {
         if !status.is_success() {
             bail!("embedding request failed with {status}: {body}");
         }
-        let result: BatchEmbedResponse =
+        let mut result: EmbeddingResponse =
             serde_json::from_str(&body).context("parse embedding response")?;
-        if result.embeddings.len() != inputs.len() {
+        result.data.sort_by_key(|item| item.index);
+        if result.data.len() != inputs.len() {
             bail!(
                 "embedding service returned {} embeddings for {} inputs",
-                result.embeddings.len(),
+                result.data.len(),
                 inputs.len()
             );
         }
         result
-            .embeddings
+            .data
             .into_iter()
-            .map(|item| normalize_embedding(item.values))
+            .map(|item| normalize_embedding(item.embedding))
             .collect()
     }
 }
 
 #[derive(Debug, Serialize)]
-struct BatchEmbedRequest<'a> {
-    requests: Vec<EmbedRequest<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EmbedRequest<'a> {
+struct EmbeddingRequest<'a> {
     model: &'a str,
-    content: Content<'a>,
-    output_dimensionality: usize,
+    input: &'a [String],
+    encoding_format: &'static str,
+    provider: ProviderPreferences,
 }
 
+/// Same privacy routing as metadata and answers: only zero-data-retention endpoints that
+/// do not collect prompts (for `google/gemini-embedding-2`, Google Vertex).
 #[derive(Debug, Serialize)]
-struct Content<'a> {
-    parts: Vec<Part<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-struct Part<'a> {
-    text: &'a str,
+struct ProviderPreferences {
+    zdr: bool,
+    data_collection: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
-struct BatchEmbedResponse {
-    #[serde(default)]
-    embeddings: Vec<ContentEmbedding>,
+struct EmbeddingResponse {
+    data: Vec<EmbeddingItem>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ContentEmbedding {
-    values: Vec<f32>,
+struct EmbeddingItem {
+    embedding: Vec<f32>,
+    index: usize,
 }
 
 fn normalize_embedding(embedding: Vec<f32>) -> Result<Vec<f32>> {

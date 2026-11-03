@@ -5,9 +5,9 @@ render_concurrency = 2
 eager_thumbnail_pages = 3
 
 [embeddings]
-base_url = "https://generativelanguage.googleapis.com/v1beta"
-model = "gemini-embedding-2"
-api_key_env = "GEMINI_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemini-embedding-2"
+api_key_env = "OPENROUTER_API_KEY"
 max_concurrency = 2
 
 [ocr]
