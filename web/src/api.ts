@@ -8,7 +8,6 @@ export type HealthResponse = components["schemas"]["HealthResponse"];
 export type OcrBlock = components["schemas"]["OcrBlock"];
 export type PageInfo = components["schemas"]["PageInfo"];
 export type SearchPassage = components["schemas"]["SearchPassage"];
-export type SearchInterpretation = components["schemas"]["SearchInterpretation"];
 export type SearchHit = components["schemas"]["SearchHit"];
 export type SearchRequest = components["schemas"]["SearchRequest"];
 export type SearchResponse = components["schemas"]["SearchResponse"];
@@ -38,7 +37,6 @@ export type LibraryQuery = {
   createdFrom: string;
   createdTo: string;
   sort: DocumentSort;
-  metadataQuery?: string;
 };
 
 export function listDocuments(query: LibraryQuery): Promise<DocumentPageResult> {
@@ -50,7 +48,6 @@ export function listDocuments(query: LibraryQuery): Promise<DocumentPageResult> 
   if (query.sender) params.set("sender", query.sender);
   if (query.createdFrom) params.set("created_from", new Date(`${query.createdFrom}T00:00:00`).toISOString());
   if (query.createdTo) params.set("created_to", new Date(`${query.createdTo}T23:59:59`).toISOString());
-  if (query.metadataQuery) params.set("query", query.metadataQuery);
   return request(`/api/documents?${params}`);
 }
 
@@ -90,11 +87,12 @@ export function inferDocumentMetadata(id: number): Promise<Document> {
 }
 
 
-export function searchDocuments(payload: SearchRequest): Promise<SearchResponse> {
+export function searchDocuments(payload: SearchRequest, signal?: AbortSignal): Promise<SearchResponse> {
   return request("/api/search", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
+    signal,
   });
 }
 

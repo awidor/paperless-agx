@@ -1,5 +1,5 @@
 /**
- * Compares the hybrid search with the search agent on a set of queries with known answers.
+ * Scores the search agent on a set of queries with known answers.
  *
  *   bun src/eval.ts <queries.json> [--model openrouter/model-id] [--concurrency 4]
  *
@@ -12,7 +12,7 @@ import { loadConfig } from "./config.ts";
 import { createRuntime } from "./runtime.ts";
 
 type Case = { query: string; expected: number[] };
-type Score = { query: string; hybrid: number; agent: number | null; seconds: number; cost: number; error?: string };
+type Score = { query: string; recall: number | null; seconds: number; cost: number; error?: string };
 
 const TOP = 5;
 const { values, positionals } = parseArgs({
@@ -34,23 +34,15 @@ function recall(found: number[], expected: number[]): number {
 }
 
 async function score(item: Case): Promise<Score> {
-  const hybrid = await runtime.paperless.search({
-    query: item.query,
-    page: 1,
-    page_size: TOP,
-    skip_inferred_sender: false,
-    skip_inferred_dates: false,
-  });
-  const hybridScore = recall(hybrid.items.map((hit) => hit.document.document_id), item.expected);
   const started = performance.now();
   const seconds = () => (performance.now() - started) / 1000;
   try {
     const run = await runAgentSearch({ query: item.query }, runtime, () => {});
     const found = run.result.results.map((result) => result.document.document_id);
-    return { query: item.query, hybrid: hybridScore, agent: recall(found, item.expected), seconds: seconds(), cost: run.costUsd };
+    return { query: item.query, recall: recall(found, item.expected), seconds: seconds(), cost: run.costUsd };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { query: item.query, hybrid: hybridScore, agent: null, seconds: seconds(), cost: 0, error: message };
+    return { query: item.query, recall: null, seconds: seconds(), cost: 0, error: message };
   }
 }
 
@@ -68,21 +60,16 @@ function percent(value: number | null): string {
   return value === null ? "error" : `${Math.round(value * 100)}%`;
 }
 
-function mean(numbers: number[]): number {
-  return numbers.reduce((total, value) => total + value, 0) / Math.max(numbers.length, 1);
-}
-
 console.log(`model ${values.model ?? config.model.id} · recall in the top ${TOP}\n`);
-console.log("hybrid  agent   seconds  query");
+console.log("recall  seconds  query");
 for (const item of scores) {
   const failure = item.error ? `  (${item.error})` : "";
-  console.log(`${percent(item.hybrid).padEnd(8)}${percent(item.agent).padEnd(8)}${item.seconds.toFixed(1).padStart(7)}  ${item.query}${failure}`);
+  console.log(`${percent(item.recall).padEnd(8)}${item.seconds.toFixed(1).padStart(7)}  ${item.query}${failure}`);
 }
+const recalls = scores.map((item) => item.recall ?? 0);
 const durations = scores.map((item) => item.seconds).sort((left, right) => left - right);
 const median = durations[Math.floor(durations.length / 2)] ?? 0;
 const cost = scores.reduce((total, item) => total + item.cost, 0);
 const failed = scores.filter((item) => item.error).length;
-console.log(
-  `\nhybrid ${percent(mean(scores.map((item) => item.hybrid)))} · agent ${percent(mean(scores.map((item) => item.agent ?? 0)))}` +
-    ` · agent median ${median.toFixed(1)} s · cost $${cost.toFixed(4)} · ${failed} failed`,
-);
+const mean = recalls.reduce((total, value) => total + value, 0) / Math.max(recalls.length, 1);
+console.log(`\nrecall ${percent(mean)} · median ${median.toFixed(1)} s · cost $${cost.toFixed(4)} · ${failed} failed`);

@@ -13,13 +13,29 @@ test.beforeEach(async ({ context }) => {
       await route.fulfill({ contentType: "image/svg+xml", body: pageImage(document) });
       return;
     }
+    if (path === "/api/search/agent") {
+      const step = { kind: "search", label: "Searching “statement”" };
+      const result = {
+        answer: null,
+        citations: [],
+        results: [{
+          document,
+          reason: "The monthly electricity statement.",
+          passage: { chunk_id: 1, page: 1, char_start: 0, char_end: 0, snippet: "", score: 0, kind: "page" },
+        }],
+      };
+      await route.fulfill({
+        contentType: "text/event-stream",
+        body: `event: progress\ndata: ${JSON.stringify(step)}\n\nevent: result\ndata: ${JSON.stringify(result)}\n\n`,
+      });
+      return;
+    }
     const responses: Record<string, unknown> = {
       "/api/health": { ocr_configured: false, embedding_configured: false },
       "/api/senders": sampleDocuments.map((item) => item.sender),
       "/api/documents": { items: sampleDocuments, total: sampleDocuments.length, page: 1, page_size: 24 },
       [`/api/documents/${document.document_id}`]: document,
       [`/api/documents/${document.document_id}/pages`]: [samplePage(document)],
-      "/api/search": { items: [], total: 0, interpretation: {} },
     };
     await route.fulfill({ json: responses[path] ?? {} });
   });

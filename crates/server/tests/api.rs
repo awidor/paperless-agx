@@ -367,15 +367,11 @@ fn old_search_payloads_default_new_fields() {
     let request: paperless_models::SearchRequest = serde_json::from_value(serde_json::json!({
         "query": "invoice",
         "page": 1,
-        "page_size": 10,
-        "sender": null,
-        "created_from": null,
-        "created_to": null
+        "page_size": 10
     }))
     .unwrap();
 
-    assert!(!request.skip_inferred_sender);
-    assert!(!request.skip_inferred_dates);
+    assert!(!request.exact);
 
     let response: paperless_models::SearchResponse = serde_json::from_value(serde_json::json!({
         "items": [],
@@ -384,7 +380,7 @@ fn old_search_payloads_default_new_fields() {
         "total": 0
     }))
     .unwrap();
-    assert_eq!(response.interpretation, Default::default());
+    assert!(response.items.is_empty());
 }
 
 #[tokio::test]

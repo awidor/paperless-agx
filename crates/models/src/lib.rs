@@ -279,18 +279,21 @@ pub struct DocumentPatch {
     pub created_at: Option<Option<DateTime<Utc>>>,
 }
 
+/// Passage search, used by the search agent and for quoted exact-text searches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
     pub page: u32,
     pub page_size: u32,
+    #[serde(default)]
     pub sender: Option<String>,
+    #[serde(default)]
     pub created_from: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub created_to: Option<DateTime<Utc>>,
+    /// Only passages that contain the query text as written; no meaning search.
     #[serde(default)]
-    pub skip_inferred_sender: bool,
-    #[serde(default)]
-    pub skip_inferred_dates: bool,
+    pub exact: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,21 +329,12 @@ pub struct SearchHit {
     pub passages: Vec<SearchPassage>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchInterpretation {
-    pub sender: Option<String>,
-    pub created_from: Option<DateTime<Utc>>,
-    pub created_to: Option<DateTime<Utc>>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResponse {
     pub items: Vec<SearchHit>,
     pub page: u32,
     pub page_size: u32,
     pub total: u64,
-    #[serde(default)]
-    pub interpretation: SearchInterpretation,
 }
 
 /// A search answered by the search agent. Sender and dates, when set, limit every lookup.

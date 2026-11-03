@@ -355,10 +355,33 @@ impl ChunkRepository {
         filter: SearchFilter,
         limit: usize,
     ) -> Result<Vec<ChunkMatch>> {
+        self.fts_candidates(fts_query(query)?, filter, limit).await
+    }
+
+    /// Passages that contain `text` as written, ignoring case.
+    pub async fn exact_candidates(
+        &self,
+        text: &str,
+        filter: SearchFilter,
+        limit: usize,
+    ) -> Result<Vec<ChunkMatch>> {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.chars().count() < 3 {
+            return Ok(Vec::new());
+        }
+        self.fts_candidates(format!("\"{}\"", text.replace('"', "\"\"")), filter, limit)
+            .await
+    }
+
+    async fn fts_candidates(
+        &self,
+        fts_query: String,
+        filter: SearchFilter,
+        limit: usize,
+    ) -> Result<Vec<ChunkMatch>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let fts_query = fts_query(query)?;
         if fts_query.is_empty() {
             return Ok(Vec::new());
         }
@@ -706,6 +729,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(inside_compound[0].chunk.chunk_id, 7);
+        // Exact text must appear as written, across word boundaries but in order.
+        let exact = |text: &'static str| {
+            let repository = repository.clone();
+            async move {
+                repository
+                    .exact_candidates(text, SearchFilter::default(), 10)
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+        assert_eq!(exact("trag zur  Kranken").await, 1);
+        assert_eq!(exact("Krankenkasse zur").await, 0);
         assert!(
             repository
                 .vector_candidates(&vec![1.0; EMBEDDING_DIMENSION], SearchFilter::default(), 1)

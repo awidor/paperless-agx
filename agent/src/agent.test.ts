@@ -41,7 +41,6 @@ const paperless: Paperless = {
     page: 1,
     page_size: request.page_size,
     total: 1,
-    interpretation: { sender: null, created_from: null, created_to: null },
   }),
   listDocuments: async () => ({ items: [document], page: 1, page_size: 1, total: 1 }),
   pages: async () => [],
@@ -67,7 +66,7 @@ function runtime(maxTurns: number) {
 
 const call = (name: string, args: JsonObject) =>
   fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
-const search = call("search", { query: "Beitrag", sender: null, date_from: null, date_to: null, limit: null });
+const search = call("search", { query: "Beitrag", exact: null, sender: null, date_from: null, date_to: null, limit: null });
 const result = (documentId: number, extra: JsonObject): JsonObject => ({
   document_id: documentId,
   page: 1,

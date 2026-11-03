@@ -149,7 +149,8 @@ function task(query: string, context: RunContext): string {
 function progressFor(tool: string, args: any, context: RunContext): AgentProgress {
   if (tool === "search") {
     const scope = [args?.sender ? `from ${args.sender}` : null, dateRange(args?.date_from, args?.date_to)].filter(Boolean);
-    return { kind: "search", label: `Searching “${args?.query ?? ""}”${scope.length ? ` ${scope.join(" ")}` : ""}` };
+    const verb = args?.exact ? "Looking for the exact text" : "Searching";
+    return { kind: "search", label: `${verb} “${args?.query ?? ""}”${scope.length ? ` ${scope.join(" ")}` : ""}` };
   }
   if (tool === "list_documents") {
     const scope = [

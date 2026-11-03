@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io,
-    time::Duration,
-};
+use std::{collections::HashMap, io, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -12,13 +8,13 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use chrono::{DateTime, Datelike, TimeDelta, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use paperless_ingest::embed_pending_chunks;
 use paperless_models::{
     AgentSearchRequest, Document, DocumentPageResult, DocumentPatch, DocumentQuery, DocumentSort,
     HealthResponse, IngestionStatus, MediaType, MetadataSource, PageInfo, PassageKind, SearchHit,
-    SearchInterpretation, SearchPassage, SearchRequest, SearchResponse, UploadMetadata,
+    SearchPassage, SearchRequest, SearchResponse, UploadMetadata,
 };
 use paperless_search::{RankedChunk, collapse_to_documents, reciprocal_rank_fusion};
 use paperless_storage::{ChunkMatch, SearchFilter, StoredObject};
@@ -264,39 +260,30 @@ pub async fn search(
             "page must start at one and page_size must be between 1 and 100"
         )));
     }
-    let known_senders = if request.sender.is_none() && !request.skip_inferred_sender {
-        state.documents.senders().await?
+    let filter = search_filter(&request);
+    let (lexical, vector) = if request.exact {
+        let exact = state
+            .chunks
+            .exact_candidates(&request.query, filter, 100)
+            .await?;
+        (exact, Vec::new())
     } else {
-        Vec::new()
+        let embeddings = state.embeddings.as_ref().ok_or_else(|| {
+            AppError::service_unavailable(anyhow::anyhow!("embedding model is not configured"))
+        })?;
+        let query_embedding = embeddings
+            .embed_query(request.query.trim().to_owned())
+            .await?;
+        let lexical = state
+            .chunks
+            .lexical_candidates(&request.query, filter.clone(), 50)
+            .await?;
+        let vector = state
+            .chunks
+            .vector_candidates(&query_embedding, filter, 50)
+            .await?;
+        (lexical, vector)
     };
-    let interpretation = infer_search_interpretation(&request, &known_senders, Utc::now());
-    let mut effective_request = request.clone();
-    effective_request.sender = request
-        .sender
-        .clone()
-        .or_else(|| interpretation.sender.clone());
-    effective_request.created_from = request.created_from.or(interpretation.created_from);
-    effective_request.created_to = request.created_to.or(interpretation.created_to);
-
-    let embeddings = state.embeddings.as_ref().ok_or_else(|| {
-        AppError::service_unavailable(anyhow::anyhow!("embedding model is not configured"))
-    })?;
-    let query_embedding = embeddings
-        .embed_query(request.query.trim().to_owned())
-        .await?;
-    let filter = search_filter(&effective_request);
-    let lexical = state
-        .chunks
-        .lexical_candidates(
-            &keyword_query(&request.query, &interpretation),
-            filter.clone(),
-            50,
-        )
-        .await?;
-    let vector = state
-        .chunks
-        .vector_candidates(&query_embedding, filter, 50)
-        .await?;
     let ranked = |matches: Vec<ChunkMatch>| {
         matches
             .into_iter()
@@ -370,7 +357,6 @@ pub async fn search(
         page: request.page,
         page_size: request.page_size,
         total,
-        interpretation,
     }))
 }
 
@@ -628,213 +614,6 @@ fn search_filter(request: &SearchRequest) -> SearchFilter {
     }
 }
 
-fn infer_search_interpretation(
-    request: &SearchRequest,
-    known_senders: &[String],
-    now: DateTime<Utc>,
-) -> SearchInterpretation {
-    let words = normalized_words(&request.query);
-    let sender = (request.sender.is_none() && !request.skip_inferred_sender)
-        .then(|| {
-            known_senders
-                .iter()
-                .filter_map(|sender| {
-                    let sender_words = normalized_words(sender);
-                    (!sender_words.is_empty()
-                        && words
-                            .windows(sender_words.len())
-                            .any(|window| window == sender_words))
-                    .then_some((sender, sender_words.iter().map(String::len).sum::<usize>()))
-                })
-                .max_by_key(|(_, length)| *length)
-                .map(|(sender, _)| sender.clone())
-        })
-        .flatten();
-
-    let mut interpretation = SearchInterpretation {
-        sender,
-        ..Default::default()
-    };
-    if !request.skip_inferred_dates
-        && (request.created_from.is_none() || request.created_to.is_none())
-        && let Some((from, to)) = inferred_date_range(&words, now)
-    {
-        if request.created_from.is_none() {
-            interpretation.created_from = Some(from);
-        }
-        if request.created_to.is_none() {
-            interpretation.created_to = Some(to);
-        }
-    }
-    interpretation
-}
-
-/// Leaves out words that became an inferred sender or date filter: the filter already
-/// enforces them, and most passages never repeat the sender's name or the month.
-fn keyword_query(query: &str, interpretation: &SearchInterpretation) -> String {
-    let sender_words = interpretation
-        .sender
-        .as_deref()
-        .map(normalized_words)
-        .unwrap_or_default()
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let dates_inferred =
-        interpretation.created_from.is_some() || interpretation.created_to.is_some();
-    query
-        .split_whitespace()
-        .filter(|term| {
-            let words = normalized_words(term);
-            words.is_empty()
-                || !words.iter().all(|word| {
-                    sender_words.contains(word) || (dates_inferred && is_date_word(word))
-                })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn is_date_word(word: &str) -> bool {
-    month_number(word).is_some()
-        || is_this(word)
-        || is_last(word)
-        || matches!(word, "year" | "jahr" | "month" | "monat")
-        || (word.len() == 4 && word.bytes().all(|byte| byte.is_ascii_digit()))
-}
-
-fn normalized_words(value: &str) -> Vec<String> {
-    value
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
-fn inferred_date_range(
-    words: &[String],
-    now: DateTime<Utc>,
-) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let month_year = words
-        .windows(2)
-        .filter_map(|pair| Some((parse_year(&pair[1], now.year())?, month_number(&pair[0])?)))
-        .filter_map(|(year, month)| month_range(year, month))
-        .collect::<Vec<_>>();
-    if !month_year.is_empty() {
-        return unique_range(month_year);
-    }
-
-    let relative = words
-        .windows(2)
-        .filter_map(|pair| {
-            let this = is_this(&pair[0]);
-            let last = is_last(&pair[0]);
-            if !(this || last) {
-                return None;
-            }
-            match pair[1].as_str() {
-                "year" | "jahr" => year_range(now.year() - i32::from(last)),
-                "month" | "monat" => {
-                    let (year, month) = if last {
-                        previous_month(now.year(), now.month())
-                    } else {
-                        (now.year(), now.month())
-                    };
-                    month_range(year, month)
-                }
-                month_name => {
-                    let month = month_number(month_name)?;
-                    let year = if last && month >= now.month() {
-                        now.year() - 1
-                    } else {
-                        now.year()
-                    };
-                    month_range(year, month)
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-    if !relative.is_empty() {
-        return unique_range(relative);
-    }
-
-    let years = words
-        .iter()
-        .filter_map(|word| parse_year(word, now.year()))
-        .filter_map(year_range)
-        .collect::<Vec<_>>();
-    unique_range(years)
-}
-
-fn unique_range(
-    mut ranges: Vec<(DateTime<Utc>, DateTime<Utc>)>,
-) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let first = ranges.pop()?;
-    ranges
-        .into_iter()
-        .all(|range| range == first)
-        .then_some(first)
-}
-
-fn parse_year(word: &str, current_year: i32) -> Option<i32> {
-    (word.len() == 4 && word.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| word.parse().ok())
-        .flatten()
-        .filter(|year| (1900..=current_year + 1).contains(year))
-}
-
-fn is_this(word: &str) -> bool {
-    matches!(word, "this" | "dieser" | "diese" | "dieses" | "diesen")
-}
-
-fn is_last(word: &str) -> bool {
-    matches!(word, "last" | "letzter" | "letzte" | "letztes" | "letzten")
-}
-
-fn month_number(word: &str) -> Option<u32> {
-    match word {
-        "january" | "januar" => Some(1),
-        "february" | "februar" => Some(2),
-        "march" | "märz" | "maerz" => Some(3),
-        "april" => Some(4),
-        "may" | "mai" => Some(5),
-        "june" | "juni" => Some(6),
-        "july" | "juli" => Some(7),
-        "august" => Some(8),
-        "september" => Some(9),
-        "october" | "oktober" => Some(10),
-        "november" => Some(11),
-        "december" | "dezember" => Some(12),
-        _ => None,
-    }
-}
-
-fn previous_month(year: i32, month: u32) -> (i32, u32) {
-    if month == 1 {
-        (year - 1, 12)
-    } else {
-        (year, month - 1)
-    }
-}
-
-fn year_range(year: i32) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let start = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).single()?;
-    let next = Utc.with_ymd_and_hms(year + 1, 1, 1, 0, 0, 0).single()?;
-    Some((start, next - TimeDelta::microseconds(1)))
-}
-
-fn month_range(year: i32, month: u32) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let start = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single()?;
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    let next = Utc
-        .with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
-        .single()?;
-    Some((start, next - TimeDelta::microseconds(1)))
-}
-
 async fn active_document(state: &AppState, document_id: u64) -> Result<Document, AppError> {
     state
         .documents
@@ -950,113 +729,5 @@ impl IntoResponse for AppError {
             self.source.to_string()
         };
         (self.status, Json(serde_json::json!({ "error": message }))).into_response()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use chrono::{TimeZone, Utc};
-    use paperless_models::SearchRequest;
-
-    use super::{infer_search_interpretation, keyword_query};
-
-    fn request(query: &str) -> SearchRequest {
-        SearchRequest {
-            query: query.into(),
-            page: 1,
-            page_size: 10,
-            sender: None,
-            created_from: None,
-            created_to: None,
-            skip_inferred_sender: false,
-            skip_inferred_dates: false,
-        }
-    }
-
-    #[test]
-    fn search_interpretation_uses_whole_longest_sender_and_explicit_month() {
-        let interpretation = infer_search_interpretation(
-            &request("Allianz Versicherungs AG renewal from March 2025"),
-            &["Allianz".into(), "Allianz Versicherungs AG".into()],
-            Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap(),
-        );
-
-        assert_eq!(
-            interpretation.sender.as_deref(),
-            Some("Allianz Versicherungs AG")
-        );
-        assert_eq!(
-            interpretation.created_from,
-            Some(Utc.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap())
-        );
-        assert_eq!(
-            interpretation.created_to,
-            Some(
-                Utc.with_ymd_and_hms(2025, 3, 31, 23, 59, 59).unwrap()
-                    + chrono::TimeDelta::microseconds(999_999)
-            )
-        );
-    }
-
-    #[test]
-    fn search_interpretation_handles_relative_german_dates_and_respects_controls() {
-        let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
-        let interpretation = infer_search_interpretation(
-            &request("Schreiben vom letzten März"),
-            &["Mär".into()],
-            now,
-        );
-        assert_eq!(
-            interpretation.created_from,
-            Some(Utc.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap())
-        );
-        assert_eq!(interpretation.sender, None);
-
-        let mut controlled = request("Allianz last year");
-        controlled.sender = Some("Explicit".into());
-        controlled.skip_inferred_dates = true;
-        assert_eq!(
-            infer_search_interpretation(&controlled, &["Allianz".into()], now),
-            Default::default()
-        );
-    }
-
-    #[test]
-    fn search_interpretation_handles_relative_periods_and_standalone_years() {
-        let now = Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap();
-        for (query, year, month) in [
-            ("this year", 2026, 1),
-            ("last year", 2025, 1),
-            ("this month", 2026, 8),
-            ("last month", 2026, 7),
-            ("invoice 2024", 2024, 1),
-            ("Januar 2023", 2023, 1),
-            ("this March", 2026, 3),
-            ("last March", 2026, 3),
-        ] {
-            assert_eq!(
-                infer_search_interpretation(&request(query), &[], now).created_from,
-                Some(Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).unwrap()),
-                "{query}"
-            );
-        }
-        assert_eq!(
-            infer_search_interpretation(&request("reference 7319"), &[], now).created_from,
-            None
-        );
-    }
-
-    #[test]
-    fn keyword_query_leaves_out_words_used_as_filters() {
-        let now = Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap();
-        let senders = vec!["IKK classic".to_owned()];
-        let query = "Beitrag IKK classic März 2025";
-        let interpretation = infer_search_interpretation(&request(query), &senders, now);
-        assert_eq!(keyword_query(query, &interpretation), "Beitrag");
-        let unfiltered = infer_search_interpretation(&request("reference 7319"), &senders, now);
-        assert_eq!(
-            keyword_query("reference 7319", &unfiltered),
-            "reference 7319"
-        );
     }
 }

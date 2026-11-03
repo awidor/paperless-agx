@@ -22,6 +22,11 @@ const searchParameters = Type.Object({
   query: Type.String({
     description: "Keywords or a short description of what the text says. A word also matches inside longer words.",
   }),
+  exact: nullable(
+    Type.Boolean({
+      description: "True to find only passages containing the query exactly as written, such as a reference number or name.",
+    }),
+  ),
   sender,
   date_from: dateFrom,
   date_to: dateTo,
@@ -85,8 +90,7 @@ export function createTools(
           sender: limits.sender,
           created_from: limits.createdFrom,
           created_to: limits.createdTo,
-          skip_inferred_sender: true,
-          skip_inferred_dates: true,
+          exact: params.exact ?? false,
         },
         signal,
       );

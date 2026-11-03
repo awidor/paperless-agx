@@ -13,19 +13,17 @@ import {
   getHealth,
   getSenders,
   listDocuments,
-  searchDocuments,
-  streamAgentSearch,
   uploadDocument,
   type Document,
   type DocumentPageResult,
   type DocumentSort,
   type HealthResponse,
   type LibraryQuery,
-  type SearchInterpretation,
 } from "./api";
 import { DocumentDetail } from "./DocumentDetail";
 import { DocumentCard, FilterPanel, initialQuery } from "./library";
-import { SearchWorkspace, agentSearchResult, type AgentSearchState, type SearchResult } from "./SearchWorkspace";
+import { useSearch } from "./search";
+import { SearchView } from "./SearchWorkspace";
 import { ThemeControl } from "./ThemeControl";
 
 type View = "grid" | "list";
@@ -91,18 +89,6 @@ function readUrlState(): UrlState {
   };
 }
 
-function matchesInterpretation(document: Document, interpretation: SearchInterpretation): boolean {
-  if (interpretation.sender && document.sender !== interpretation.sender) return false;
-  const timestamp = Date.parse(document.created_at || document.added_at);
-  const from = interpretation.created_from ? Date.parse(interpretation.created_from) : Number.NaN;
-  const to = interpretation.created_to ? Date.parse(interpretation.created_to) : Number.NaN;
-  return (Number.isNaN(from) || timestamp >= from) && (Number.isNaN(to) || timestamp <= to);
-}
-
-function shortDate(value: string | null | undefined): string {
-  return value?.slice(0, 10) ?? "";
-}
-
 export default function App() {
   const initial = useRef(readUrlState()).current;
   const [query, setQuery] = useState(initial.query);
@@ -111,25 +97,16 @@ export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [searchText, setSearchText] = useState(initial.search);
   const [activeSearch, setActiveSearch] = useState(initial.search);
-  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
-  const [searchInterpretation, setSearchInterpretation] = useState<SearchInterpretation | null>(null);
-  const [skipInferredSender, setSkipInferredSender] = useState(false);
-  const [skipInferredDates, setSkipInferredDates] = useState(false);
-  const [searchLimited, setSearchLimited] = useState(false);
   const [selected, setSelected] = useState(initial.selected);
   const [view, setView] = useState<View>(initial.view);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
-  const [searchLoading, setSearchLoading] = useState(false);
   const [dropping, setDropping] = useState(false);
   const [uploadState, setUploadState] = useState<UploadState | null>(null);
   const [libraryError, setLibraryError] = useState("");
-  const [searchError, setSearchError] = useState("");
   const [contextError, setContextError] = useState("");
   const [dataVersion, setDataVersion] = useState(0);
-  const [searchVersion, setSearchVersion] = useState(0);
-  const [agentSearch, setAgentSearch] = useState<AgentSearchState | null>(null);
-  const [agentVersion, setAgentVersion] = useState(0);
+  const [searchRun, setSearchRun] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const uploadingRef = useRef(false);
@@ -140,7 +117,9 @@ export default function App() {
 
   const searching = activeSearch.length > 0;
   const uploading = uploadState?.active ?? false;
-  const error = searchError || libraryError || contextError;
+  const error = libraryError || contextError;
+  const search = useSearch(activeSearch, query, searchRun);
+  const searchBusy = search?.status === "running";
 
   const refreshLibrary = useCallback(async () => {
     try {
@@ -183,100 +162,6 @@ export default function App() {
   }, [hasProcessingDocuments, refreshLibrary]);
 
   useEffect(() => {
-    if (!searching) {
-      setSearchResults(null);
-      setSearchInterpretation(null);
-      setSearchLimited(false);
-      setSearchError("");
-      setSearchLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setSearchLoading(true);
-    setSearchError("");
-    void Promise.all([
-      searchDocuments({
-        query: activeSearch,
-        page: 1,
-        page_size: 100,
-        sender: query.sender || null,
-        created_from: query.createdFrom ? new Date(`${query.createdFrom}T00:00:00`).toISOString() : null,
-        created_to: query.createdTo ? new Date(`${query.createdTo}T23:59:59`).toISOString() : null,
-        skip_inferred_sender: skipInferredSender,
-        skip_inferred_dates: skipInferredDates,
-      }),
-      listDocuments({ ...query, page: 1, pageSize: 100, metadataQuery: activeSearch }),
-    ])
-      .then(([content, metadata]) => {
-        if (cancelled) return;
-        const seen = new Set<number>();
-        const results: SearchResult[] = content.items.map((hit) => {
-          seen.add(hit.document.document_id);
-          return { document: hit.document, hit };
-        });
-        for (const document of metadata.items) {
-          if (!seen.has(document.document_id) && matchesInterpretation(document, content.interpretation)) {
-            seen.add(document.document_id);
-            results.push({ document });
-          }
-        }
-        setSearchResults(results);
-        setSearchInterpretation(content.interpretation);
-        setSearchLimited(content.total > content.items.length || metadata.total > metadata.items.length);
-      })
-      .catch((cause) => {
-        if (!cancelled) setSearchError(cause instanceof Error ? cause.message : "Search failed.");
-      })
-      .finally(() => {
-        if (!cancelled) setSearchLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeSearch, dataVersion, query.createdFrom, query.createdTo, query.sender, query.sort, searchVersion, searching, skipInferredDates, skipInferredSender]);
-
-  const agentAvailable = health?.agent_configured ?? false;
-  useEffect(() => {
-    if (!searching || !agentAvailable) {
-      setAgentSearch(null);
-      return;
-    }
-    const controller = new AbortController();
-    setAgentSearch({ status: "running", progress: [] });
-    void streamAgentSearch(
-      {
-        query: activeSearch,
-        sender: query.sender || null,
-        created_from: query.createdFrom ? new Date(`${query.createdFrom}T00:00:00`).toISOString() : null,
-        created_to: query.createdTo ? new Date(`${query.createdTo}T23:59:59`).toISOString() : null,
-      },
-      (progress) => setAgentSearch((current) => current?.status === "running" ? { status: "running", progress: [...current.progress, progress] } : current),
-      controller.signal,
-    )
-      .then((result) => setAgentSearch({ status: "done", result }))
-      .catch((cause) => {
-        if (!controller.signal.aborted) setAgentSearch({ status: "failed", message: cause instanceof Error ? cause.message : "it failed" });
-      });
-    return () => controller.abort();
-  }, [activeSearch, agentAvailable, agentVersion, query.createdFrom, query.createdTo, query.sender, searching]);
-
-  const agentResults = useMemo(
-    () => agentSearch?.status === "done" && agentSearch.result.results.length > 0 ? agentSearch.result.results.map(agentSearchResult) : null,
-    [agentSearch],
-  );
-  const shownSearchResults = agentResults ?? searchResults;
-
-  const hasProcessingSearchResults = searchResults?.some(
-    ({ document }) => document.status !== "READY" && document.status !== "FAILED",
-  ) ?? false;
-
-  useEffect(() => {
-    if (!hasProcessingSearchResults) return;
-    const timer = window.setInterval(() => setSearchVersion((version) => version + 1), 2_000);
-    return () => window.clearInterval(timer);
-  }, [hasProcessingSearchResults]);
-
-  useEffect(() => {
     const url = new URL(window.location.href);
     for (const key of ["q", "page", "sender", "from", "to", "sort", "view", "document", "document_page"]) {
       url.searchParams.delete(key);
@@ -307,18 +192,11 @@ export default function App() {
         return;
       }
       const next = readUrlState();
-      const searchChanged = next.search !== activeSearch;
       openedFromUi.current = false;
       detailDirty.current = false;
       setQuery(next.query);
       setSearchText(next.search);
       setActiveSearch(next.search);
-      if (searchChanged) {
-        setSearchResults(null);
-        setSearchInterpretation(null);
-        setSkipInferredSender(false);
-        setSkipInferredDates(false);
-      }
       setView(next.view);
       setSelected(next.selected);
     }
@@ -326,10 +204,7 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, [activeSearch, selected]);
 
-  const shownDocuments = searching
-    ? shownSearchResults?.map((result) => result.document) ?? []
-    : library?.items ?? [];
-  const terms = useMemo(() => activeSearch.split(/\s+/).filter(Boolean), [activeSearch]);
+  const terms = useMemo(() => activeSearch.split(/\s+/).filter((term) => term.length >= 3), [activeSearch]);
 
   function checkpointHistory() {
     window.history.pushState(null, "", window.location.href);
@@ -343,14 +218,7 @@ export default function App() {
       return;
     }
     if (value !== activeSearch) checkpointHistory();
-    else {
-      setSearchVersion((version) => version + 1);
-      setAgentVersion((version) => version + 1);
-    }
-    if (value !== activeSearch) setSearchResults(null);
-    setSearchInterpretation(null);
-    setSkipInferredSender(false);
-    setSkipInferredDates(false);
+    else setSearchRun((run) => run + 1);
     setActiveSearch(value);
   }
 
@@ -358,11 +226,6 @@ export default function App() {
     if (activeSearch) checkpointHistory();
     setActiveSearch("");
     setSearchText("");
-    setSearchResults(null);
-    setSearchInterpretation(null);
-    setSkipInferredSender(false);
-    setSkipInferredDates(false);
-    setSearchError("");
   }
 
   async function upload(files: FileList | File[]) {
@@ -422,7 +285,6 @@ export default function App() {
   }, []);
 
   function updateQuery(next: LibraryQuery) {
-    if (searching) setSearchResults(null);
     setQuery({ ...next, page: 1 });
   }
 
@@ -443,7 +305,6 @@ export default function App() {
   }
 
   function filterBySender(sender: string) {
-    if (searching) setSearchResults(null);
     setQuery((value) => ({ ...value, sender, page: 1 }));
   }
 
@@ -453,30 +314,9 @@ export default function App() {
     query.createdTo && { key: "to", label: `To: ${query.createdTo}`, clear: () => updateQuery({ ...query, createdTo: "" }) },
     !searching && query.sort !== initialQuery.sort && { key: "sort", label: "Custom sort", clear: () => updateQuery({ ...query, sort: initialQuery.sort }) },
   ].filter((filter): filter is { key: string; label: string; clear: () => void } => Boolean(filter));
-  // The understood sender and dates shape the instant matches, not the agent's ranking.
-  const inferredFilters = searching && searchInterpretation && !agentResults ? [
-    !skipInferredSender && searchInterpretation.sender && {
-      key: "inferred-sender",
-      label: `Understood sender: ${searchInterpretation.sender}`,
-      clear: () => setSkipInferredSender(true),
-    },
-    !skipInferredDates && (searchInterpretation.created_from || searchInterpretation.created_to) && {
-      key: "inferred-dates",
-      label: searchInterpretation.created_from && searchInterpretation.created_to
-        ? `Understood dates: ${shortDate(searchInterpretation.created_from)} to ${shortDate(searchInterpretation.created_to)}`
-        : searchInterpretation.created_from
-          ? `Understood from: ${shortDate(searchInterpretation.created_from)}`
-          : `Understood to: ${shortDate(searchInterpretation.created_to)}`,
-      clear: () => setSkipInferredDates(true),
-    },
-  ].filter((filter): filter is { key: string; label: string; clear: () => void } => Boolean(filter)) : [];
-  const shownFilters = [...activeFilters, ...inferredFilters];
+  const shownFilters = activeFilters;
 
   function clearAllFilters() {
-    if (searching) {
-      setSkipInferredSender(true);
-      setSkipInferredDates(true);
-    }
     updateQuery(initialQuery);
   }
   const nothingFiled = !searching && activeFilters.length === 0 && library?.total === 0;
@@ -498,15 +338,15 @@ export default function App() {
           <span className="brand-name">Paperless</span>
           <span className="brand-agx">AGX</span>
         </div>
-        <form className="global-search" onSubmit={runSearch} aria-busy={searchLoading}>
+        <form className="global-search" onSubmit={runSearch} aria-busy={searchBusy}>
           <button className="search-submit" aria-label="Search"><Search size={18} aria-hidden="true" /></button>
           <input
             value={searchText}
             onChange={(event) => setSearchText(event.target.value)}
-            placeholder="Search documents"
+            placeholder="Ask, describe a document, or “quote” exact text"
             aria-label="Search documents"
           />
-          {searchLoading && <LoaderCircle className="spin search-progress" size={16} aria-label="Searching" />}
+          {searchBusy && <LoaderCircle className="spin search-progress" size={16} aria-label="Searching" />}
           {searching ? (
             <button type="button" className="clear-search" onClick={clearSearch}><X size={15} /> Clear</button>
           ) : null}
@@ -523,7 +363,7 @@ export default function App() {
       </header>
 
       <main>
-        {error && <div className="error-banner" role="alert">{error}<button onClick={() => { setSearchError(""); setLibraryError(""); setContextError(""); }} aria-label="Dismiss error"><X size={16} /></button></div>}
+        {error && <div className="error-banner" role="alert">{error}<button onClick={() => { setLibraryError(""); setContextError(""); }} aria-label="Dismiss error"><X size={16} /></button></div>}
         {uploadState && <div className={`upload-banner${uploadState.failures.length ? " has-errors" : ""}`} role={uploadState.failures.length && !uploadState.active ? "alert" : "status"}><span>{uploadMessage}</span>{!uploadState.active && <button onClick={() => setUploadState(null)} aria-label="Dismiss upload status"><X size={16} /></button>}</div>}
 
         <section className="library-toolbar">
@@ -531,9 +371,9 @@ export default function App() {
             <h2>{searching ? "Search results" : "Library"}</h2>
             <span className="toolbar-count" aria-live="polite">
               {searching
-                ? shownSearchResults === null
-                  ? "Searching"
-                  : <>“{activeSearch}” · {shownSearchResults.length}{searchLimited && !agentResults ? "+" : ""} {shownSearchResults.length === 1 ? "document" : "documents"}</>
+                ? search?.status === "done"
+                  ? <>{search.results.length} {search.results.length === 1 ? "document" : "documents"} {search.mode === "exact" ? "contain" : "for"} “{search.mode === "exact" ? search.text : activeSearch}”</>
+                  : search?.status === "running" ? "Searching" : null
                 : library && <>{library.total} {library.total === 1 ? "document" : "documents"}</>}
             </span>
           </div>
@@ -562,7 +402,17 @@ export default function App() {
         {filtersOpen && <FilterPanel query={query} senders={senders} searching={searching} onChange={updateQuery} />}
         {shownFilters.length > 0 && <div className="active-filters" aria-label="Active filters">{shownFilters.map((filter) => <button key={filter.key} onClick={filter.clear} aria-label={`Remove ${filter.label}`}><span>{filter.label}</span><X size={13} aria-hidden="true" /></button>)}<button className="clear-all-filters" onClick={clearAllFilters}>Clear all</button></div>}
 
-        {initialLoading && !library ? (
+        {searching ? (
+          search && <SearchView
+            key={activeSearch}
+            state={search}
+            terms={terms}
+            hasFilters={activeFilters.length > 0}
+            onOpen={openDocument}
+            onRetry={() => setSearchRun((run) => run + 1)}
+            onClearFilters={clearAllFilters}
+          />
+        ) : initialLoading && !library ? (
           <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Loading your documents</p></div>
         ) : !library ? (
           <div className="empty-state">
@@ -570,8 +420,6 @@ export default function App() {
             <p>Check that the Paperless AGX server is running, then try again.</p>
             <button onClick={() => void refreshLibrary()}>Try again</button>
           </div>
-        ) : searching && shownSearchResults === null && (searchLoading || agentSearch?.status === "running") ? (
-          <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Searching your documents</p></div>
         ) : nothingFiled ? (
           <div className="empty-state">
             <FileSearch size={36} aria-hidden="true" />
@@ -579,18 +427,16 @@ export default function App() {
             <p>Drop files anywhere on this page, or choose files to begin. PDF, PNG, JPEG, TIFF and WebP are processed on this machine.</p>
             <button onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Upload documents</button>
           </div>
-        ) : shownDocuments.length === 0 ? (
+        ) : library.items.length === 0 ? (
           <div className="empty-state">
             <FileSearch size={36} aria-hidden="true" />
-            <h3>No matches</h3>
-            <p>Try different words or remove a filter to search more of the library.</p>
-            <div className="empty-actions">{searching && <button onClick={clearSearch}>Clear search</button>}{shownFilters.length > 0 && <button onClick={clearAllFilters}>Clear filters</button>}</div>
+            <h3>No documents match these filters</h3>
+            <p>Remove a filter to see more of the library.</p>
+            <div className="empty-actions"><button onClick={clearAllFilters}>Clear filters</button></div>
           </div>
-        ) : searching && shownSearchResults ? (
-          <SearchWorkspace key={activeSearch} results={shownSearchResults} terms={terms} loading={searchLoading} agent={agentSearch} agentRanked={agentResults !== null} onOpen={openDocument} />
         ) : (
-          <div className={`document-collection ${view}`} aria-busy={searchLoading}>
-            {shownDocuments.map((document) => (
+          <div className={`document-collection ${view}`}>
+            {library.items.map((document) => (
               <DocumentCard
                 key={document.document_id}
                 document={document}

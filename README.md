@@ -28,11 +28,11 @@ PAPERLESS_AGENT_CONFIG=../config/paperless-agent.local.toml bun run start
 
 ## Search
 
-- Typing a query shows keyword and meaning matches at once while the agent searches.
-- The agent combines passage search, document lists by sender or date, and page reading. It then ranks the matching documents, gives the reason for each, and answers questions the documents answer, citing its sources.
+- The search agent answers every search. It looks things up in the archive: passage search, document lists by sender or date, and page reading. It then ranks the matching documents, gives the reason for each, and answers questions the documents answer, citing its sources. The page shows each lookup while it works.
+- Put the whole query in quotes, such as `"285 334 268"`, to find passages containing that exact text instead. That search is instant and does not use the agent.
 - The agent only cites documents and passages its lookups returned, and quotes only text found on the page.
 - Every document gets a short AI summary when it is indexed, and the summary is searchable too. Documents indexed before summaries existed are summarized at the next start.
-- Compare the hybrid search and the agent on your own queries with `bun run eval <queries.json>` in `agent/`. The file is a list of `{"query": "...", "expected": [document ids]}`, and `--model` tries another OpenRouter model.
+- Score the agent on your own queries with `bun run eval <queries.json>` in `agent/`. The file is a list of `{"query": "...", "expected": [document ids]}`, and `--model` tries another OpenRouter model.
 
 - Open http://127.0.0.1:3000.
 - Local use: no built-in authentication.

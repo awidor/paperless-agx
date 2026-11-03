@@ -280,6 +280,7 @@ export interface components {
             blocks: components["schemas"]["OcrBlock"][];
             html?: string | null;
         };
+        /** @description Passage search, used by the search agent and for quoted exact-text searches. */
         SearchRequest: {
             query: string;
             page: number;
@@ -289,10 +290,11 @@ export interface components {
             created_from?: string | null;
             /** Format: date-time */
             created_to?: string | null;
-            /** @default false */
-            skip_inferred_sender: boolean;
-            /** @default false */
-            skip_inferred_dates: boolean;
+            /**
+             * @description Only passages that contain the query text as written; no meaning search.
+             * @default false
+             */
+            exact: boolean;
         };
         /**
          * @description page: text from a page; summary: the document's AI summary, which has no place on a page.
@@ -318,19 +320,11 @@ export interface components {
             score: number;
             passages: components["schemas"]["SearchPassage"][];
         };
-        SearchInterpretation: {
-            sender: string | null;
-            /** Format: date-time */
-            created_from: string | null;
-            /** Format: date-time */
-            created_to: string | null;
-        };
         SearchResponse: {
             items: components["schemas"]["SearchHit"][];
             page: number;
             page_size: number;
             total: number;
-            interpretation: components["schemas"]["SearchInterpretation"];
         };
         AgentSearchRequest: {
             query: string;
