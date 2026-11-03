@@ -5,7 +5,7 @@ Document OCR, search, and answers with page references. Rust, React, and SQLite.
 ## Setup
 
 - Rust 1.96+, Bun 1.3+, Node.js 24, and Poppler (`poppler-utils`).
-- Local Chandra OCR service; model alias `chandra`.
+- Local llama.cpp OCR server: Surya OCR 2.5 (`surya`, served with `--special`) or Chandra OCR 2 (`chandra`); choose with `[ocr] profile`.
 - OpenRouter API access for metadata, answers, and `google/gemini-embedding-2` search embeddings.
 - Copy `.env.example` to `.env` and set your API keys.
 - Set endpoints in `config/paperless-agx.toml`. Model-server example: `config/llama-models.ini`.

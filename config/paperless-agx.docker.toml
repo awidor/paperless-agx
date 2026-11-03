@@ -12,12 +12,16 @@ max_concurrency = 2
 
 [ocr]
 base_url = "http://host.docker.internal:8765/v1"
-model = "chandra"
+model = "surya"
+profile = "surya"
 api_key_env = "OCR_API_KEY"
-# Match the two Chandra slots in the example llama.cpp router profile.
+# Match the two Surya slots in the example llama.cpp router profile.
 max_concurrency = 2
 pages_per_request = 2
-max_output_tokens = 24576
+# Surya's own full-page budget and recognition resolution. For Chandra use
+# model = "chandra", profile = "chandra", max_output_tokens = 12384 and dpi = 120.
+max_output_tokens = 12288
+dpi = 192
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"

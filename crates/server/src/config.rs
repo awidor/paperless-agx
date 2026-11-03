@@ -89,11 +89,13 @@ api_key_env = "OPENROUTER_API_KEY"
 max_concurrency = 2
 [ocr]
 base_url = "http://127.0.0.1:8765/v1"
-model = "chandra"
+model = "surya"
+profile = "surya"
 api_key_env = "OCR_API_KEY"
 max_concurrency = 2
 pages_per_request = 2
-max_output_tokens = 24576
+max_output_tokens = 12288
+dpi = 192
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"
@@ -119,8 +121,10 @@ max_concurrency = 1
         );
         assert_eq!(config.embeddings.as_ref().unwrap().max_concurrency, 2);
         assert_eq!(config.ocr.pages_per_request, 2);
-        assert_eq!(config.ocr.model, "chandra");
-        assert_eq!(config.ocr.max_output_tokens, 24_576);
+        assert_eq!(config.ocr.model, "surya");
+        assert_eq!(config.ocr.profile, paperless_ocr_client::OcrProfile::Surya);
+        assert_eq!(config.ocr.max_output_tokens, 12_288);
+        assert_eq!(config.ocr.dpi, 192);
         assert_eq!(config.llm.model, "z-ai/glm-5.3-flash");
         assert_eq!(config.llm.max_concurrency, 1);
     }

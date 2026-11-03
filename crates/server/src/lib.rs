@@ -76,6 +76,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         config.render_concurrency,
         config.eager_thumbnail_pages,
         config.ocr.pages_per_request,
+        config.ocr.dpi,
     )?;
     let embedding_model = config
         .embeddings

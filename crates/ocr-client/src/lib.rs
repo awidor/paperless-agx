@@ -13,6 +13,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
 use url::Url;
 
+mod repetition;
+mod surya;
+
 // Chandra OCR layout prompt: Copyright 2025 Endless Labs, Inc.
 // Apache-2.0; see licenses/chandra.txt and github.com/datalab-to/chandra.
 const CHANDRA_OCR_LAYOUT_PROMPT: &str = r#"OCR this image to HTML, arranged as layout blocks.  Each layout block should be a div with the data-bbox attribute representing the bounding box of the block in x0 y0 x1 y1 format.  Bboxes are normalized 0-1000. The data-label attribute is the label for the block.
@@ -52,6 +55,9 @@ Guidelines:
 * Use the simplest possible HTML structure that accurately represents the content of the block.
 * Make sure the text is accurate and easy for a human to read and interpret.  Reading order should be correct and natural."#;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// Datalab's Chandra and Surya clients retry a page whose output loops or runs out of tokens
+/// three times, at temperature 0.2, 0.4 and 0.6 with top_p 0.95.
+const OCR_RETRIES: u32 = 3;
 const METADATA_REQUEST_ATTEMPTS: usize = 5;
 const MAX_RETRY_AFTER_SECONDS: u64 = 30;
 const METADATA_PROMPT: &str = "Extract metadata from the OCR text.\nReturn only a JSON object with nullable string fields title, sender, and created_at.\nUse a concise, human-readable title in the document's language. Do not copy the first line as the title.\nSet sender to the company or person that issued or sent the document. Write the same sender with exactly the same wording in every document. Use null when the sender is not stated or unclear; do not guess.\nSet created_at to the date stated in the document, such as the letter date or invoice date. Never use a scan date or print timestamp.\nUse YYYY-MM-DD for created_at.";
@@ -62,6 +68,41 @@ const ANSWER_PASSAGE_MAX_CHARS: usize = 2_400;
 const ANSWER_EVIDENCE_MAX_CHARS: usize = 30_000;
 const ANSWER_QUERY_MAX_CHARS: usize = 2_000;
 
+/// Which OCR model family the endpoint serves; decides the prompt and output format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrProfile {
+    /// Chandra OCR 2: HTML blocks with `data-label` and `data-bbox`.
+    #[default]
+    Chandra,
+    /// Surya OCR 2.5: compact block headers made of special tokens. The llama.cpp server must
+    /// run with `--special` so they appear in the output.
+    Surya,
+}
+
+impl OcrProfile {
+    fn prompt(self) -> &'static str {
+        match self {
+            Self::Chandra => CHANDRA_OCR_LAYOUT_PROMPT,
+            Self::Surya => surya::FULL_PAGE_PROMPT,
+        }
+    }
+
+    fn page_html(self, content: &str) -> String {
+        match self {
+            Self::Chandra => content.to_owned(),
+            Self::Surya => surya::decode(content),
+        }
+    }
+}
+
+/// 120 dpi is the floor that still reads cleanly for Chandra: it halves image-encode time
+/// against 150 with identical block counts and ~99.8% text match, while 96 starts dropping
+/// whole blocks. Surya recognizes text at 192 dpi by default.
+const fn default_ocr_dpi() -> u32 {
+    120
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrConfig {
     pub base_url: Url,
@@ -70,6 +111,11 @@ pub struct OcrConfig {
     pub max_concurrency: usize,
     pub pages_per_request: usize,
     pub max_output_tokens: u32,
+    #[serde(default)]
+    pub profile: OcrProfile,
+    /// Resolution PDF pages are rendered at for OCR.
+    #[serde(default = "default_ocr_dpi")]
+    pub dpi: u32,
 }
 
 impl OcrConfig {
@@ -88,6 +134,9 @@ impl OcrConfig {
         }
         if self.max_output_tokens == 0 {
             bail!("ocr.max_output_tokens must be greater than zero");
+        }
+        if self.dpi == 0 {
+            bail!("ocr.dpi must be greater than zero");
         }
         Ok(())
     }
@@ -225,17 +274,19 @@ impl OcrClient {
         }
     }
 
-    pub fn prepare_page_request(&self, page: &PageImage) -> Result<Request> {
+    /// Builds the OCR request for one page. Attempt 0 decodes greedily; retries sample.
+    pub fn prepare_page_request(&self, page: &PageImage, attempt: u32) -> Result<Request> {
         let api_key = &self.api_key;
         if page.page == 0 {
             bail!("OCR page number must start at one");
         }
 
+        let (temperature, top_p) = ocr_sampling(attempt);
         let body = ChatRequest {
             model: self.config.model.clone(),
             max_tokens: self.config.max_output_tokens,
-            temperature: 0.0,
-            top_p: 0.1,
+            temperature,
+            top_p,
             messages: vec![ChatMessage {
                 role: "user",
                 content: vec![
@@ -249,7 +300,7 @@ impl OcrClient {
                         },
                     },
                     UserContent::Text {
-                        text: CHANDRA_OCR_LAYOUT_PROMPT.into(),
+                        text: self.config.profile.prompt().into(),
                     },
                 ],
             }],
@@ -392,12 +443,43 @@ impl OcrClient {
     }
 
     async fn recognize_page(self, page: PageImage) -> Result<OcrPage> {
-        let request = self.prepare_page_request(&page)?;
-        let bytes = self
-            .execute(request, self.request_gate.clone(), "OCR")
-            .await
-            .with_context(|| format!("OCR page {}", page.page))?;
-        parse_page_response(page.page, &bytes, self.config.max_output_tokens)
+        let mut repetitive = None;
+        let mut attempt = 0;
+        loop {
+            let request = self.prepare_page_request(&page, attempt)?;
+            let bytes = self
+                .execute(request, self.request_gate.clone(), "OCR")
+                .await
+                .with_context(|| format!("OCR page {}", page.page))?;
+            let problem = match parse_page_response(
+                page.page,
+                &bytes,
+                self.config.max_output_tokens,
+                self.config.profile,
+            )? {
+                PageResult::Complete(recognized) => return Ok(recognized),
+                PageResult::Repetitive(recognized) => {
+                    repetitive = Some(recognized);
+                    format!("OCR page {} output ends in a repeated sequence", page.page)
+                }
+                PageResult::Unusable(problem) => problem,
+            };
+            if attempt == OCR_RETRIES {
+                // Like Datalab's client, keep a finished but repetitive page rather than lose it.
+                if let Some(recognized) = repetitive {
+                    warn!(
+                        page = page.page,
+                        attempts = attempt + 1,
+                        "keeping repetitive OCR output"
+                    );
+                    return Ok(recognized);
+                }
+                bail!("{problem} (after {} attempts)", attempt + 1);
+            }
+            attempt += 1;
+            let (temperature, top_p) = ocr_sampling(attempt);
+            warn!(page = page.page, attempt, temperature, top_p, problem = %problem, "retrying OCR page");
+        }
     }
 
     async fn execute_with_retries<F>(
@@ -740,41 +822,76 @@ fn clean_metadata_value(
     Ok(value)
 }
 
-fn parse_page_response(page: u32, body: &[u8], max_output_tokens: u32) -> Result<OcrPage> {
+/// Greedy for the first attempt, then Datalab's retry schedule.
+fn ocr_sampling(attempt: u32) -> (f32, f32) {
+    if attempt == 0 {
+        (0.0, 0.1)
+    } else {
+        ((0.2 * attempt as f32).min(0.8), 0.95)
+    }
+}
+
+#[derive(Debug)]
+enum PageResult {
+    Complete(OcrPage),
+    /// Finished, but the output ends in a loop.
+    Repetitive(OcrPage),
+    /// Cut off by the output or context limit, or unreadable output that loops.
+    Unusable(String),
+}
+
+fn parse_page_response(
+    page: u32,
+    body: &[u8],
+    max_output_tokens: u32,
+    profile: OcrProfile,
+) -> Result<PageResult> {
     let response: ChatResponse = serde_json::from_slice(body).context("parse OCR JSON response")?;
     let choice = response
         .choices
         .first()
         .context("OCR response has no choices")?;
     if choice.finish_reason.as_deref() == Some("length") {
-        match response.usage {
-            Some(usage) if usage.completion_tokens < max_output_tokens => bail!(
+        return Ok(PageResult::Unusable(match response.usage {
+            Some(usage) if usage.completion_tokens < max_output_tokens => format!(
                 "OCR page {page} exhausted the OCR model context after {} prompt and {} output tokens ({} total); configured output limit is {max_output_tokens}",
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.total_tokens,
+                usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
             ),
-            Some(usage) => bail!(
+            Some(usage) => format!(
                 "OCR page {page} hit the configured {max_output_tokens} output-token limit after {} prompt tokens and is truncated",
                 usage.prompt_tokens,
             ),
-            None => bail!(
+            None => format!(
                 "OCR page {page} stopped for length and is truncated; the OCR provider omitted token usage (configured output limit is {max_output_tokens})"
             ),
-        }
+        }));
     }
-    let html = choice
+    let content = choice
         .message
         .content
         .as_deref()
         .context("OCR response has no content")?;
-    let text = html2md::parse_html(html).trim().to_owned();
-    let blocks = parse_ocr_blocks(html)?;
-    Ok(OcrPage {
+    let repetitive = repetition::ends_in_repetition(content);
+    let html = profile.page_html(content);
+    let blocks = match parse_ocr_blocks(&html) {
+        Ok(blocks) => blocks,
+        Err(error) if repetitive => {
+            return Ok(PageResult::Unusable(format!(
+                "OCR page {page} output repeats itself and does not parse: {error:#}"
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    let recognized = OcrPage {
         page,
-        text,
+        text: html2md::parse_html(&html).trim().to_owned(),
         blocks,
-        html: html.to_owned(),
+        html,
+    };
+    Ok(if repetitive {
+        PageResult::Repetitive(recognized)
+    } else {
+        PageResult::Complete(recognized)
     })
 }
 
@@ -943,8 +1060,8 @@ mod tests {
 
     use super::{
         ANSWER_PROMPT, GeneratedAnswer, LlmConfig, METADATA_PROMPT, OcrClient, OcrConfig,
-        PageImage, known_senders_block, metadata_text, parse_answer_response,
-        parse_metadata_response, parse_page_response,
+        OcrProfile, PageImage, PageResult, known_senders_block, metadata_text,
+        parse_answer_response, parse_metadata_response, parse_page_response,
     };
 
     static ENVIRONMENT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -959,6 +1076,8 @@ mod tests {
                 max_concurrency: 2,
                 pages_per_request,
                 max_output_tokens: 24_576,
+                profile: OcrProfile::Chandra,
+                dpi: 120,
             },
             LlmConfig {
                 base_url: Url::parse("https://openrouter.ai/api/v1").unwrap(),
@@ -980,6 +1099,8 @@ mod tests {
                 max_concurrency: 1,
                 pages_per_request: 1,
                 max_output_tokens: 16_384,
+                profile: OcrProfile::Chandra,
+                dpi: 120,
             },
             LlmConfig {
                 base_url,
@@ -996,11 +1117,14 @@ mod tests {
         let _guard = ENVIRONMENT_LOCK.lock().await;
         let client = client("PAPERLESS_TEST_OCR_KEY", 2);
         let request = client
-            .prepare_page_request(&PageImage {
-                page: 4,
-                media_type: "image/png".into(),
-                bytes: vec![1, 2, 3],
-            })
+            .prepare_page_request(
+                &PageImage {
+                    page: 4,
+                    media_type: "image/png".into(),
+                    bytes: vec![1, 2, 3],
+                },
+                0,
+            )
             .unwrap();
 
         assert_eq!(
@@ -1012,6 +1136,7 @@ mod tests {
             serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
         assert_eq!(body["model"], "chandra");
         assert_eq!(body["max_tokens"], 24_576);
+        assert_eq!(body["temperature"], 0.0);
         assert_eq!(
             body["messages"][0]["content"][0]["image_url"]["url"],
             "data:image/png;base64,AQID"
@@ -1075,6 +1200,8 @@ mod tests {
                 max_concurrency: 2,
                 pages_per_request: 2,
                 max_output_tokens: 16_384,
+                profile: OcrProfile::Chandra,
+                dpi: 120,
             },
             LlmConfig {
                 base_url: Url::parse("https://openrouter.ai/api/v1").unwrap(),
@@ -1306,8 +1433,12 @@ mod tests {
             3,
             br#"{"choices":[{"message":{"content":"<div data-label=\"SectionHeader\" data-bbox=\"0 0 1000 100\"><h1>Title</h1></div><div data-label=\"Text\" data-bbox=\"0 100 1000 200\"><p>Body text</p></div><div data-label=\"Figure\" data-bbox=\"0 200 1000 800\"><img alt=\"Revenue chart\"><p>Revenue rises each year.</p></div>"}}]}"#,
             24_576,
+            OcrProfile::Chandra,
         )
         .unwrap();
+        let PageResult::Complete(page) = page else {
+            panic!("expected a complete page, got {page:?}");
+        };
         assert_eq!(page.page, 3);
         assert!(page.text.contains("Title"));
         assert!(page.text.contains("Body text"));
@@ -1337,14 +1468,18 @@ mod tests {
                 "total_tokens": 13_773
             }
         });
-        let error =
-            parse_page_response(1, &serde_json::to_vec(&body).unwrap(), 12_288).unwrap_err();
+        let result = parse_page_response(
+            1,
+            &serde_json::to_vec(&body).unwrap(),
+            12_288,
+            OcrProfile::Chandra,
+        )
+        .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("configured 12288 output-token limit")
-        );
+        let PageResult::Unusable(problem) = result else {
+            panic!("expected a truncated page, got {result:?}");
+        };
+        assert!(problem.contains("configured 12288 output-token limit"));
     }
 
     #[test]
@@ -1360,10 +1495,18 @@ mod tests {
                 "total_tokens": 12_288
             }
         });
-        let error =
-            parse_page_response(1, &serde_json::to_vec(&body).unwrap(), 12_288).unwrap_err();
+        let result = parse_page_response(
+            1,
+            &serde_json::to_vec(&body).unwrap(),
+            12_288,
+            OcrProfile::Chandra,
+        )
+        .unwrap();
 
-        assert!(error.to_string().contains(
+        let PageResult::Unusable(problem) = result else {
+            panic!("expected a truncated page, got {result:?}");
+        };
+        assert!(problem.contains(
             "exhausted the OCR model context after 1485 prompt and 10803 output tokens (12288 total)"
         ));
     }
@@ -1423,5 +1566,128 @@ mod tests {
             parse_answer_response(&serde_json::to_vec(&blank).unwrap(), 3).unwrap(),
             GeneratedAnswer::default()
         );
+    }
+
+    #[test]
+    fn parses_surya_compact_output_into_blocks() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {"content": "<|Section-Header|><|50|><|40|><|600|><|80|><h1>Beitragsbescheid</h1><|Text|><|50|><|100|><|950|><|160|><p>Ihr Beitrag ab 01.06.2025</p><|im_end|>"},
+                "finish_reason": "stop"
+            }]
+        });
+        let result = parse_page_response(
+            1,
+            &serde_json::to_vec(&body).unwrap(),
+            12_288,
+            OcrProfile::Surya,
+        )
+        .unwrap();
+        let PageResult::Complete(page) = result else {
+            panic!("expected a complete page, got {result:?}");
+        };
+        assert_eq!(page.blocks.len(), 2);
+        assert_eq!(page.blocks[0].label, "Section-Header");
+        assert_eq!(page.blocks[0].bbox, [50, 40, 600, 80]);
+        assert_eq!(page.blocks[1].text, "Ihr Beitrag ab 01.06.2025");
+        assert!(page.text.contains("Beitragsbescheid"));
+        assert!(!page.html.contains("<|"));
+    }
+
+    #[tokio::test]
+    async fn retries_a_looping_page_with_sampling() {
+        let _guard = ENVIRONMENT_LOCK.lock().await;
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let route_requests = requests.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let route_requests = route_requests.clone();
+                async move {
+                    let attempt = {
+                        let mut seen = route_requests.lock().unwrap();
+                        seen.push(body);
+                        seen.len()
+                    };
+                    let (content, finish_reason) = match attempt {
+                        1 => (
+                            format!(
+                                "<div data-label=\"Form\" data-bbox=\"0 0 1000 900\">{}",
+                                "<p>Text</p>".repeat(400)
+                            ),
+                            "length",
+                        ),
+                        2 => (
+                            format!(
+                                "<div data-label=\"Text\" data-bbox=\"0 0 1000 100\"><p>Name</p>{}</div>",
+                                "<p>Text</p>".repeat(12)
+                            ),
+                            "stop",
+                        ),
+                        _ => (
+                            "<div data-label=\"Text\" data-bbox=\"0 0 1000 100\"><p>SEPA-Lastschriftmandat</p></div>".into(),
+                            "stop",
+                        ),
+                    };
+                    Json(serde_json::json!({
+                        "choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
+                        "usage": {"prompt_tokens": 1957, "completion_tokens": 24_576, "total_tokens": 26_533}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url =
+            Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let key_name = "PAPERLESS_TEST_OCR_RETRY_KEY";
+        unsafe { std::env::set_var(key_name, "secret") };
+        let client = OcrClient::from_environment(
+            OcrConfig {
+                base_url: base_url.clone(),
+                model: "chandra".into(),
+                api_key_env: key_name.into(),
+                max_concurrency: 1,
+                pages_per_request: 1,
+                max_output_tokens: 24_576,
+                profile: OcrProfile::Chandra,
+                dpi: 120,
+            },
+            LlmConfig {
+                base_url,
+                model: "z-ai/glm-5.3-flash".into(),
+                api_key_env: key_name.into(),
+                max_concurrency: 1,
+            },
+        )
+        .unwrap();
+
+        let pages = client
+            .recognize_pages(vec![PageImage {
+                page: 1,
+                media_type: "image/png".into(),
+                bytes: vec![1, 2, 3],
+            }])
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var(key_name) };
+
+        assert_eq!(pages[0].blocks[0].text, "SEPA-Lastschriftmandat");
+        let requests = requests.lock().unwrap();
+        let sampling = requests
+            .iter()
+            .map(|body| {
+                (
+                    body["temperature"].as_f64().unwrap(),
+                    body["top_p"].as_f64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sampling.len(), 3);
+        assert!(sampling[0].0 == 0.0 && (sampling[0].1 - 0.1).abs() < 1e-6);
+        assert!((sampling[1].0 - 0.2).abs() < 1e-6 && (sampling[1].1 - 0.95).abs() < 1e-6);
+        assert!((sampling[2].0 - 0.4).abs() < 1e-6);
     }
 }

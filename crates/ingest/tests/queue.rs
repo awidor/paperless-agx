@@ -47,7 +47,7 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
         deleted_at: None,
     };
     repository.insert(&document).await.unwrap();
-    let previews = PreviewService::new(layout, 1, 1, 1).unwrap();
+    let previews = PreviewService::new(layout, 1, 1, 1, 120).unwrap();
     let ocr = OcrClient::from_environment(
         OcrConfig {
             base_url: url::Url::parse("http://127.0.0.1:1/v1").unwrap(),
@@ -56,6 +56,8 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
             max_concurrency: 1,
             pages_per_request: 1,
             max_output_tokens: 16_384,
+            profile: Default::default(),
+            dpi: 120,
         },
         LlmConfig {
             base_url: url::Url::parse("https://openrouter.ai/api/v1").unwrap(),
@@ -171,6 +173,8 @@ async fn transient_metadata_failure_retries_before_following_stage() {
             max_concurrency: 1,
             pages_per_request: 1,
             max_output_tokens: 16_384,
+            profile: Default::default(),
+            dpi: 120,
         },
         LlmConfig {
             base_url,
@@ -180,7 +184,7 @@ async fn transient_metadata_failure_retries_before_following_stage() {
         },
     )
     .unwrap();
-    let previews = PreviewService::new(layout, 1, 1, 1).unwrap();
+    let previews = PreviewService::new(layout, 1, 1, 1, 120).unwrap();
     let _queue =
         IngestionQueue::start(repository.clone(), pages, chunks, previews, ocr, None, 1, 1)
             .await
@@ -281,6 +285,8 @@ async fn metadata_error_fails_the_document() {
             max_concurrency: 1,
             pages_per_request: 1,
             max_output_tokens: 16_384,
+            profile: Default::default(),
+            dpi: 120,
         },
         LlmConfig {
             base_url,
@@ -290,7 +296,7 @@ async fn metadata_error_fails_the_document() {
         },
     )
     .unwrap();
-    let previews = PreviewService::new(layout, 1, 1, 1).unwrap();
+    let previews = PreviewService::new(layout, 1, 1, 1, 120).unwrap();
     let _queue =
         IngestionQueue::start(repository.clone(), pages, chunks, previews, ocr, None, 1, 1)
             .await

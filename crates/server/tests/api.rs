@@ -37,6 +37,8 @@ fn config(data_dir: &Path, base_url: Url) -> AppConfig {
             max_concurrency: 2,
             pages_per_request: 4,
             max_output_tokens: 16_384,
+            profile: Default::default(),
+            dpi: 120,
         },
     }
 }

@@ -13,10 +13,6 @@ use tokio::{process::Command, sync::Semaphore};
 
 const THUMBNAIL_WIDTH: u32 = 320;
 const THUMBNAIL_HEIGHT: u32 = 480;
-// 120dpi is the floor that still reads cleanly: it halves image-encode time
-// against 150 with identical block counts and ~99.8% text match, while 96
-// starts dropping whole blocks.
-const OCR_DPI: u32 = 120;
 
 #[derive(Clone)]
 pub struct PreviewService {
@@ -24,6 +20,8 @@ pub struct PreviewService {
     render_gate: Arc<Semaphore>,
     eager_thumbnail_pages: u32,
     max_ocr_batch_pages: usize,
+    /// Resolution PDF pages are rendered at for OCR and for the page viewer.
+    ocr_dpi: u32,
 }
 
 impl PreviewService {
@@ -32,6 +30,7 @@ impl PreviewService {
         render_concurrency: usize,
         eager_thumbnail_pages: u32,
         max_ocr_batch_pages: usize,
+        ocr_dpi: u32,
     ) -> Result<Self> {
         if render_concurrency == 0 {
             bail!("render_concurrency must be greater than zero");
@@ -39,11 +38,15 @@ impl PreviewService {
         if max_ocr_batch_pages == 0 {
             bail!("max_ocr_batch_pages must be greater than zero");
         }
+        if ocr_dpi == 0 {
+            bail!("ocr_dpi must be greater than zero");
+        }
         Ok(Self {
             layout,
             render_gate: Arc::new(Semaphore::new(render_concurrency)),
             eager_thumbnail_pages,
             max_ocr_batch_pages,
+            ocr_dpi,
         })
     }
     pub const fn max_ocr_batch_pages(&self) -> usize {
@@ -102,7 +105,7 @@ impl PreviewService {
             MediaType::Image => load_image(source).await?,
             MediaType::Pdf => {
                 let rendered =
-                    render_pdf_page(&self.layout, &source, page, Some(OCR_DPI), None).await?;
+                    render_pdf_page(&self.layout, &source, page, Some(self.ocr_dpi), None).await?;
                 let image = load_image(rendered.clone()).await?;
                 tokio::fs::remove_file(rendered)
                     .await
@@ -164,7 +167,8 @@ impl PreviewService {
                 let mut pages = Vec::with_capacity(page_count as usize);
                 for page in first_page..=last_page {
                     let path =
-                        render_pdf_page(&self.layout, &source, page, Some(OCR_DPI), None).await?;
+                        render_pdf_page(&self.layout, &source, page, Some(self.ocr_dpi), None)
+                            .await?;
                     let bytes = tokio::fs::read(&path)
                         .await
                         .context("read rendered OCR page")?;
