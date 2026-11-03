@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use paperless_models::Chunk;
+use paperless_models::{Chunk, summary_chunk_id};
 use rusqlite::{OptionalExtension, params, types::Value};
 
 use crate::{DataLayout, database::Database};
@@ -77,6 +77,48 @@ impl ChunkRepository {
                         .context("store document chunk")?;
                 }
                 transaction.commit().context("commit chunk transaction")?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Replaces a document's summary passage. The new passage has no embedding yet;
+    /// `pending_embeddings` hands it to the embedding model.
+    pub async fn replace_summary(
+        &self,
+        document_id: u64,
+        summary: Option<String>,
+        sender: Option<String>,
+        created_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let chunk_id = i64_value(summary_chunk_id(document_id), "chunk id")?;
+        let document_id = i64_value(document_id, "document id")?;
+        self.database
+            .run(move |connection| {
+                let transaction = connection
+                    .transaction()
+                    .context("start summary transaction")?;
+                transaction
+                    .execute("DELETE FROM chunks WHERE chunk_id = ?", [chunk_id])
+                    .context("remove prior summary passage")?;
+                if let Some(summary) = summary {
+                    transaction
+                        .execute(
+                            "INSERT INTO chunks (
+                                chunk_id, document_id, page_start, page_end, char_start,
+                                char_end, text, embedding, created_at, sender
+                             ) VALUES (?, ?, 1, 1, 0, 0, ?, NULL, ?, ?)",
+                            params![
+                                chunk_id,
+                                document_id,
+                                summary,
+                                created_at.map(timestamp),
+                                sender
+                            ],
+                        )
+                        .context("store summary passage")?;
+                }
+                transaction.commit().context("commit summary transaction")?;
                 Ok(())
             })
             .await
@@ -396,10 +438,13 @@ fn filter_sql(filter: &SearchFilter) -> (String, Vec<Value>) {
     (where_sql, values)
 }
 
+/// Each whitespace-separated term must occur somewhere in the passage, also inside a longer
+/// word. The trigram index cannot match terms shorter than three characters, so those are
+/// left to the vector search instead of making every keyword match fail.
 fn fts_query(query: &str) -> Result<String> {
     let terms = query
         .split_whitespace()
-        .filter(|term| !term.is_empty())
+        .filter(|term| term.chars().count() >= 3)
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>();
     Ok(terms.join(" "))
@@ -555,6 +600,7 @@ mod tests {
             last_error: None,
             retry_count: 0,
             deleted_at: None,
+            summary: None,
         }
     }
 
@@ -653,6 +699,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lexical[0].chunk.chunk_id, 7);
+        // The rebuilt trigram index finds a word inside a compound, and ignores terms too
+        // short to index instead of failing the whole match.
+        let inside_compound = repository
+            .lexical_candidates("kasse zu", SearchFilter::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(inside_compound[0].chunk.chunk_id, 7);
         assert!(
             repository
                 .vector_candidates(&vec![1.0; EMBEDDING_DIMENSION], SearchFilter::default(), 1)

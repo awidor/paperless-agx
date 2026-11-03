@@ -1,0 +1,23 @@
+{
+  "name": "paperless-agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "generate:api": "openapi-typescript ../openapi.json -o src/api.generated.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "start": "bun src/server.ts",
+    "eval": "bun src/eval.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^1.5.0",
+    "@earendil-works/pi-ai": "^1.5.0",
+    "typebox": "^1.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "openapi-typescript": "7.10.1",
+    "typescript": "5.9.3"
+  }
+}

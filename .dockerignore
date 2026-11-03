@@ -10,3 +10,4 @@ data
 **/*.sqlite*
 web/test-results
 web/playwright-report
+agent/node_modules

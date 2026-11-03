@@ -197,6 +197,7 @@ mod tests {
             last_error: None,
             retry_count: 0,
             deleted_at: None,
+            summary: None,
         }
     }
 

@@ -144,6 +144,9 @@ pub struct Document {
     pub last_error: Option<String>,
     pub retry_count: u32,
     pub deleted_at: Option<DateTime<Utc>>,
+    /// AI summary: the kind of document, its subject and the facts people search for.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 impl Document {
@@ -188,6 +191,13 @@ pub struct PageInfo {
     pub html: Option<String>,
 }
 
+/// Chunk ordinals start at one; ordinal zero holds the document summary.
+const SUMMARY_CHUNK_ORDINAL: u64 = 0;
+
+pub fn summary_chunk_id(document_id: u64) -> u64 {
+    (document_id << 32) | SUMMARY_CHUNK_ORDINAL
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Chunk {
     pub chunk_id: u64,
@@ -200,6 +210,13 @@ pub struct Chunk {
     pub embedding: Vec<f32>,
     pub created_at: Option<DateTime<Utc>>,
     pub sender: Option<String>,
+}
+
+impl Chunk {
+    /// The summary passage is not page text, so it has no place on a page to highlight.
+    pub fn is_summary(&self) -> bool {
+        self.chunk_id == summary_chunk_id(self.document_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +293,16 @@ pub struct SearchRequest {
     pub skip_inferred_dates: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PassageKind {
+    /// Text from a page.
+    #[default]
+    Page,
+    /// The document's AI summary.
+    Summary,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchPassage {
     pub chunk_id: u64,
@@ -284,6 +311,8 @@ pub struct SearchPassage {
     pub char_end: u32,
     pub snippet: String,
     pub score: f32,
+    #[serde(default)]
+    pub kind: PassageKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -314,16 +343,16 @@ pub struct SearchResponse {
     pub interpretation: SearchInterpretation,
 }
 
+/// A search answered by the search agent. Sender and dates, when set, limit every lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchAnswerRequest {
+pub struct AgentSearchRequest {
     pub query: String,
-    pub chunk_ids: Vec<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchAnswerResponse {
-    pub answer: Option<String>,
-    pub citations: Vec<u64>,
+    #[serde(default)]
+    pub sender: Option<String>,
+    #[serde(default)]
+    pub created_from: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub created_to: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -331,6 +360,7 @@ pub struct InferredMetadata {
     pub title: Option<String>,
     pub sender: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
+    pub summary: Option<String>,
 }
 
 fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -350,6 +380,7 @@ pub struct HealthResponse {
     pub metadata_model: String,
     pub embedding_configured: bool,
     pub embedding_model: String,
+    pub agent_configured: bool,
 }
 
 #[cfg(test)]

@@ -166,7 +166,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/search/answer": {
+    "/api/search/agent": {
         parameters: {
             query?: never;
             header?: never;
@@ -175,7 +175,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["answerSearch"];
+        /** @description Runs the search agent. Responds with server-sent events: `progress` (AgentProgress) while it looks things up, then one `result` (AgentSearchResult) or `error` (AgentError). */
+        post: operations["agentSearch"];
         delete?: never;
         options?: never;
         head?: never;
@@ -248,6 +249,7 @@ export interface components {
             retry_count: number;
             /** Format: date-time */
             deleted_at?: string | null;
+            summary?: string | null;
         };
         DocumentPatch: {
             title?: string | null;
@@ -292,6 +294,11 @@ export interface components {
             /** @default false */
             skip_inferred_dates: boolean;
         };
+        /**
+         * @description page: text from a page; summary: the document's AI summary, which has no place on a page.
+         * @enum {string}
+         */
+        PassageKind: "page" | "summary";
         SearchPassage: {
             /** Format: uint64 */
             chunk_id: number;
@@ -300,6 +307,7 @@ export interface components {
             char_end: number;
             snippet: string;
             score: number;
+            kind: components["schemas"]["PassageKind"];
         };
         SearchHit: {
             document: components["schemas"]["Document"];
@@ -324,13 +332,33 @@ export interface components {
             total: number;
             interpretation: components["schemas"]["SearchInterpretation"];
         };
-        SearchAnswerRequest: {
+        AgentSearchRequest: {
             query: string;
-            chunk_ids: number[];
+            sender?: string | null;
+            /** Format: date-time */
+            created_from?: string | null;
+            /** Format: date-time */
+            created_to?: string | null;
         };
-        SearchAnswerResponse: {
+        AgentProgress: {
+            /** @enum {string} */
+            kind: "search" | "list" | "read" | "thinking";
+            label: string;
+        };
+        AgentResultItem: {
+            document: components["schemas"]["Document"];
+            reason: string;
+            /** @description Evidence from the archive. chunk_id 0 marks a quote from a page that is not one stored passage; an empty snippet means the page itself is the evidence. */
+            passage: components["schemas"]["SearchPassage"];
+        };
+        AgentSearchResult: {
             answer: string | null;
+            /** @description Indexes into results that support the answer. */
             citations: number[];
+            results: components["schemas"]["AgentResultItem"][];
+        };
+        AgentError: {
+            message: string;
         };
         HealthResponse: {
             status: string;
@@ -340,6 +368,7 @@ export interface components {
             metadata_model: string;
             embedding_configured: boolean;
             embedding_model: string;
+            agent_configured: boolean;
         };
     };
     responses: never;
@@ -657,7 +686,7 @@ export interface operations {
             };
         };
     };
-    answerSearch: {
+    agentSearch: {
         parameters: {
             query?: never;
             header?: never;
@@ -666,18 +695,25 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SearchAnswerRequest"];
+                "application/json": components["schemas"]["AgentSearchRequest"];
             };
         };
         responses: {
-            /** @description Citation-backed search answer */
+            /** @description Agent events */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SearchAnswerResponse"];
+                    "text/event-stream": string;
                 };
+            };
+            /** @description The search agent is not configured or unreachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

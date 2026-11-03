@@ -10,6 +10,10 @@ model = "google/gemini-embedding-2"
 api_key_env = "OPENROUTER_API_KEY"
 max_concurrency = 2
 
+# The search agent service (agent/), behind /api/search/agent.
+[agent]
+url = "http://127.0.0.1:3100"
+
 [ocr]
 base_url = "http://127.0.0.1:8765/v1"
 model = "surya"

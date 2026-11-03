@@ -14,6 +14,7 @@ import {
   getSenders,
   listDocuments,
   searchDocuments,
+  streamAgentSearch,
   uploadDocument,
   type Document,
   type DocumentPageResult,
@@ -24,7 +25,7 @@ import {
 } from "./api";
 import { DocumentDetail } from "./DocumentDetail";
 import { DocumentCard, FilterPanel, initialQuery } from "./library";
-import { SearchWorkspace, type SearchResult } from "./SearchWorkspace";
+import { SearchWorkspace, agentSearchResult, type AgentSearchState, type SearchResult } from "./SearchWorkspace";
 import { ThemeControl } from "./ThemeControl";
 
 type View = "grid" | "list";
@@ -127,6 +128,8 @@ export default function App() {
   const [contextError, setContextError] = useState("");
   const [dataVersion, setDataVersion] = useState(0);
   const [searchVersion, setSearchVersion] = useState(0);
+  const [agentSearch, setAgentSearch] = useState<AgentSearchState | null>(null);
+  const [agentVersion, setAgentVersion] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const uploadingRef = useRef(false);
@@ -232,6 +235,37 @@ export default function App() {
     };
   }, [activeSearch, dataVersion, query.createdFrom, query.createdTo, query.sender, query.sort, searchVersion, searching, skipInferredDates, skipInferredSender]);
 
+  const agentAvailable = health?.agent_configured ?? false;
+  useEffect(() => {
+    if (!searching || !agentAvailable) {
+      setAgentSearch(null);
+      return;
+    }
+    const controller = new AbortController();
+    setAgentSearch({ status: "running", progress: [] });
+    void streamAgentSearch(
+      {
+        query: activeSearch,
+        sender: query.sender || null,
+        created_from: query.createdFrom ? new Date(`${query.createdFrom}T00:00:00`).toISOString() : null,
+        created_to: query.createdTo ? new Date(`${query.createdTo}T23:59:59`).toISOString() : null,
+      },
+      (progress) => setAgentSearch((current) => current?.status === "running" ? { status: "running", progress: [...current.progress, progress] } : current),
+      controller.signal,
+    )
+      .then((result) => setAgentSearch({ status: "done", result }))
+      .catch((cause) => {
+        if (!controller.signal.aborted) setAgentSearch({ status: "failed", message: cause instanceof Error ? cause.message : "it failed" });
+      });
+    return () => controller.abort();
+  }, [activeSearch, agentAvailable, agentVersion, query.createdFrom, query.createdTo, query.sender, searching]);
+
+  const agentResults = useMemo(
+    () => agentSearch?.status === "done" && agentSearch.result.results.length > 0 ? agentSearch.result.results.map(agentSearchResult) : null,
+    [agentSearch],
+  );
+  const shownSearchResults = agentResults ?? searchResults;
+
   const hasProcessingSearchResults = searchResults?.some(
     ({ document }) => document.status !== "READY" && document.status !== "FAILED",
   ) ?? false;
@@ -293,7 +327,7 @@ export default function App() {
   }, [activeSearch, selected]);
 
   const shownDocuments = searching
-    ? searchResults?.map((result) => result.document) ?? []
+    ? shownSearchResults?.map((result) => result.document) ?? []
     : library?.items ?? [];
   const terms = useMemo(() => activeSearch.split(/\s+/).filter(Boolean), [activeSearch]);
 
@@ -309,7 +343,10 @@ export default function App() {
       return;
     }
     if (value !== activeSearch) checkpointHistory();
-    else setSearchVersion((version) => version + 1);
+    else {
+      setSearchVersion((version) => version + 1);
+      setAgentVersion((version) => version + 1);
+    }
     if (value !== activeSearch) setSearchResults(null);
     setSearchInterpretation(null);
     setSkipInferredSender(false);
@@ -416,7 +453,8 @@ export default function App() {
     query.createdTo && { key: "to", label: `To: ${query.createdTo}`, clear: () => updateQuery({ ...query, createdTo: "" }) },
     !searching && query.sort !== initialQuery.sort && { key: "sort", label: "Custom sort", clear: () => updateQuery({ ...query, sort: initialQuery.sort }) },
   ].filter((filter): filter is { key: string; label: string; clear: () => void } => Boolean(filter));
-  const inferredFilters = searching && searchInterpretation ? [
+  // The understood sender and dates shape the instant matches, not the agent's ranking.
+  const inferredFilters = searching && searchInterpretation && !agentResults ? [
     !skipInferredSender && searchInterpretation.sender && {
       key: "inferred-sender",
       label: `Understood sender: ${searchInterpretation.sender}`,
@@ -493,9 +531,9 @@ export default function App() {
             <h2>{searching ? "Search results" : "Library"}</h2>
             <span className="toolbar-count" aria-live="polite">
               {searching
-                ? searchLoading && searchResults === null
+                ? shownSearchResults === null
                   ? "Searching"
-                  : <>“{activeSearch}” · {searchResults?.length ?? 0}{searchLimited ? "+" : ""} {(searchResults?.length ?? 0) === 1 ? "document" : "documents"}</>
+                  : <>“{activeSearch}” · {shownSearchResults.length}{searchLimited && !agentResults ? "+" : ""} {shownSearchResults.length === 1 ? "document" : "documents"}</>
                 : library && <>{library.total} {library.total === 1 ? "document" : "documents"}</>}
             </span>
           </div>
@@ -532,7 +570,7 @@ export default function App() {
             <p>Check that the Paperless AGX server is running, then try again.</p>
             <button onClick={() => void refreshLibrary()}>Try again</button>
           </div>
-        ) : searching && searchLoading && searchResults === null ? (
+        ) : searching && shownSearchResults === null && (searchLoading || agentSearch?.status === "running") ? (
           <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Searching your documents</p></div>
         ) : nothingFiled ? (
           <div className="empty-state">
@@ -548,8 +586,8 @@ export default function App() {
             <p>Try different words or remove a filter to search more of the library.</p>
             <div className="empty-actions">{searching && <button onClick={clearSearch}>Clear search</button>}{shownFilters.length > 0 && <button onClick={clearAllFilters}>Clear filters</button>}</div>
           </div>
-        ) : searching && searchResults ? (
-          <SearchWorkspace key={activeSearch} query={activeSearch} results={searchResults} terms={terms} loading={searchLoading} onOpen={openDocument} />
+        ) : searching && shownSearchResults ? (
+          <SearchWorkspace key={activeSearch} results={shownSearchResults} terms={terms} loading={searchLoading} agent={agentSearch} agentRanked={agentResults !== null} onOpen={openDocument} />
         ) : (
           <div className={`document-collection ${view}`} aria-busy={searchLoading}>
             {shownDocuments.map((document) => (

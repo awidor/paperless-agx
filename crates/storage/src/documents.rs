@@ -55,8 +55,8 @@ impl DocumentRepository {
                             document_id, content_hash, media_type, filename, title, sender,
                             created_at, added_at, updated_at, title_source, sender_source,
                             created_at_source, page_count, file_size, status, last_error,
-                            retry_count, deleted_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            retry_count, deleted_at, summary
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         params![
                             i64_value(document.document_id, "document id")?,
                             document.content_hash.as_slice(),
@@ -76,6 +76,7 @@ impl DocumentRepository {
                             document.last_error,
                             i64_value(u64::from(document.retry_count), "retry count")?,
                             optional_timestamp(document.deleted_at),
+                            document.summary,
                         ],
                     )
                     .context("insert document")?;
@@ -93,7 +94,7 @@ impl DocumentRepository {
                         "SELECT document_id, content_hash, media_type, filename, title, sender,
                                 created_at, added_at, updated_at, title_source, sender_source,
                                 created_at_source, page_count, file_size, status, last_error,
-                                retry_count, deleted_at
+                                retry_count, deleted_at, summary
                          FROM documents WHERE document_id = ?",
                         [document_id],
                         document_from_row,
@@ -113,7 +114,7 @@ impl DocumentRepository {
                         "SELECT document_id, content_hash, media_type, filename, title, sender,
                                 created_at, added_at, updated_at, title_source, sender_source,
                                 created_at_source, page_count, file_size, status, last_error,
-                                retry_count, deleted_at
+                                retry_count, deleted_at, summary
                          FROM documents
                          WHERE content_hash = ? AND deleted_at IS NULL
                          LIMIT 1",
@@ -253,7 +254,7 @@ impl DocumentRepository {
                         "SELECT document_id, content_hash, media_type, filename, title, sender,
                                 created_at, added_at, updated_at, title_source, sender_source,
                                 created_at_source, page_count, file_size, status, last_error,
-                                retry_count, deleted_at
+                                retry_count, deleted_at, summary
                          FROM documents WHERE document_id = ?",
                         [document_id],
                         document_from_row,
@@ -272,7 +273,7 @@ impl DocumentRepository {
                     .execute(
                         "UPDATE documents
                          SET title = ?, sender = ?, created_at = ?, title_source = ?,
-                             sender_source = ?, created_at_source = ?, updated_at = ?
+                             sender_source = ?, created_at_source = ?, summary = ?, updated_at = ?
                          WHERE document_id = ?",
                         params![
                             document.title,
@@ -281,6 +282,7 @@ impl DocumentRepository {
                             optional_source(document.title_source),
                             optional_source(document.sender_source),
                             optional_source(document.created_at_source),
+                            document.summary,
                             timestamp(Utc::now()),
                             i64_value(document.document_id, "document id")?,
                         ],
@@ -353,7 +355,7 @@ impl DocumentRepository {
                     "SELECT document_id, content_hash, media_type, filename, title, sender,
                             created_at, added_at, updated_at, title_source, sender_source,
                             created_at_source, page_count, file_size, status, last_error,
-                            retry_count, deleted_at
+                            retry_count, deleted_at, summary
                      FROM documents WHERE {predicate}
                      ORDER BY COALESCE(created_at, added_at) DESC, document_id DESC"
                 );
@@ -407,6 +409,7 @@ fn document_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document> {
         last_error: row.get(15)?,
         retry_count: from_i64(row.get(16)?, "retry_count")? as u32,
         deleted_at: from_optional_timestamp(row.get(17)?, 17)?,
+        summary: row.get(18)?,
     })
 }
 
@@ -496,6 +499,7 @@ mod tests {
             last_error: None,
             retry_count: 0,
             deleted_at: None,
+            summary: None,
         }
     }
 

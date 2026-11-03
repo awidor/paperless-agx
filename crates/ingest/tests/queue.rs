@@ -45,6 +45,7 @@ async fn failure_is_persisted_and_manual_retry_is_counted() {
         last_error: None,
         retry_count: 0,
         deleted_at: None,
+        summary: None,
     };
     repository.insert(&document).await.unwrap();
     let previews = PreviewService::new(layout, 1, 1, 1, 120).unwrap();
@@ -109,6 +110,7 @@ async fn transient_metadata_failure_retries_before_following_stage() {
         last_error: None,
         retry_count: 0,
         deleted_at: None,
+        summary: None,
     };
     repository.insert(&document).await.unwrap();
     pages
@@ -242,6 +244,7 @@ async fn metadata_error_fails_the_document() {
         last_error: None,
         retry_count: 0,
         deleted_at: None,
+        summary: None,
     };
     repository.insert(&document).await.unwrap();
     pages

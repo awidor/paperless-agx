@@ -60,7 +60,7 @@ fn configure(connection: &mut Connection) -> Result<()> {
 }
 
 /// Bump when the schema changes in a way `CREATE ... IF NOT EXISTS` cannot express.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const CHUNK_COLUMNS_SQL: &str = "(\n\
     chunk_id INTEGER PRIMARY KEY,\n\
@@ -97,6 +97,20 @@ fn initialize(connection: &mut Connection) -> Result<()> {
             ))
             .context("migrate chunks to nullable embeddings")?;
     }
+    if version < 2 {
+        if table_exists(&transaction, "documents")?
+            && !column_exists(&transaction, "documents", "summary")?
+        {
+            transaction
+                .execute_batch("ALTER TABLE documents ADD COLUMN summary TEXT;")
+                .context("add document summaries")?;
+        }
+        // Version 2 indexes trigrams so a word also matches inside German compounds
+        // ("Beitrag" in "Krankenkassenbeitrag"); the table is rebuilt below.
+        transaction
+            .execute_batch("DROP TABLE IF EXISTS chunks_fts;")
+            .context("drop word-based chunk index")?;
+    }
     transaction
         .execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS documents (\n\
@@ -117,7 +131,8 @@ fn initialize(connection: &mut Connection) -> Result<()> {
                  status TEXT NOT NULL,\n\
                  last_error TEXT,\n\
                  retry_count INTEGER NOT NULL,\n\
-                 deleted_at INTEGER\n\
+                 deleted_at INTEGER,\n\
+                 summary TEXT\n\
              );\n\
              CREATE UNIQUE INDEX IF NOT EXISTS documents_active_hash\n\
                  ON documents(content_hash) WHERE deleted_at IS NULL;\n\
@@ -135,7 +150,7 @@ fn initialize(connection: &mut Connection) -> Result<()> {
              CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id, chunk_id);\n\
              CREATE INDEX IF NOT EXISTS chunks_sender_date ON chunks(sender, created_at);\n\
              CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(\n\
-                 text, content='chunks', content_rowid='chunk_id', tokenize='unicode61'\n\
+                 text, content='chunks', content_rowid='chunk_id', tokenize='trigram'\n\
              );\n\
              CREATE TRIGGER IF NOT EXISTS chunks_insert AFTER INSERT ON chunks BEGIN\n\
                  INSERT INTO chunks_fts(rowid, text) VALUES (new.chunk_id, new.text);\n\
@@ -174,4 +189,14 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
             |row| row.get(0),
         )
         .with_context(|| format!("check for SQLite table {name}"))
+}
+
+fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?) WHERE name = ?)",
+            [table, column],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("check for SQLite column {table}.{column}"))
 }

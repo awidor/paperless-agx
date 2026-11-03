@@ -11,7 +11,8 @@ use axum::{
 };
 use paperless_embeddings::EmbeddingService;
 use paperless_ingest::{
-    CleanupQueue, IngestionQueue, MetadataService, PreviewService, embed_pending_chunks,
+    CleanupQueue, IngestionQueue, MetadataService, PreviewService, backfill_summaries,
+    embed_pending_chunks,
 };
 use paperless_models::IngestionStatus;
 use paperless_ocr_client::OcrClient;
@@ -26,7 +27,7 @@ use tower_http::{
 };
 use tracing::{error, info, warn};
 
-pub use config::{AppConfig, EmbeddingConfig};
+pub use config::{AgentConfig, AppConfig, EmbeddingConfig};
 pub use routes::AppError;
 
 #[derive(Clone)]
@@ -43,6 +44,7 @@ pub struct AppState {
     pub embeddings: Option<EmbeddingService>,
     pub embedding_model: String,
     pub ocr: OcrClient,
+    pub agent: Option<routes::AgentProxy>,
     pub upload_commit: Arc<Mutex<()>>,
 }
 
@@ -103,16 +105,13 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         if cleared > 0 {
             info!(cleared, vector_space = %service.vector_space(), "embedding model changed; re-embedding stored chunks");
         }
-        let (chunks, service) = (chunks.clone(), service.clone());
-        tokio::spawn(async move {
-            match embed_pending_chunks(&chunks, &service).await {
-                Ok(0) => {}
-                Ok(count) => info!(count, "embedded stored chunks"),
-                Err(error) => error!(error = %format!("{error:#}"), "embed stored chunks"),
-            }
-        });
     }
     let ocr = OcrClient::from_environment(config.ocr, config.llm)?;
+    let agent = config
+        .agent
+        .as_ref()
+        .map(routes::AgentProxy::new)
+        .transpose()?;
     let ingestion = IngestionQueue::start(
         documents.clone(),
         pages.clone(),
@@ -135,6 +134,28 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
     )
     .await?;
     let metadata = MetadataService::new(documents.clone(), chunks.clone());
+    if let Some(service) = &embeddings {
+        let (documents, pages, chunks, metadata, ocr, service) = (
+            documents.clone(),
+            pages.clone(),
+            chunks.clone(),
+            metadata.clone(),
+            ocr.clone(),
+            service.clone(),
+        );
+        tokio::spawn(async move {
+            match backfill_summaries(&documents, &pages, &metadata, &ocr).await {
+                Ok(0) => {}
+                Ok(count) => info!(count, "summarized documents"),
+                Err(error) => error!(error = %format!("{error:#}"), "summarize documents"),
+            }
+            match embed_pending_chunks(&chunks, &service).await {
+                Ok(0) => {}
+                Ok(count) => info!(count, "embedded stored chunks"),
+                Err(error) => error!(error = %format!("{error:#}"), "embed stored chunks"),
+            }
+        });
+    }
     let state = AppState {
         layout,
         documents,
@@ -148,6 +169,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         embeddings,
         embedding_model,
         ocr,
+        agent,
         upload_commit: Arc::new(Mutex::new(())),
     };
 
@@ -179,7 +201,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
             post(routes::infer_document_metadata),
         )
         .route("/api/search", post(routes::search))
-        .route("/api/search/answer", post(routes::answer_search))
+        .route("/api/search/agent", post(routes::agent_search))
         .route("/api/senders", get(routes::senders))
         .route("/api/openapi.json", get(routes::openapi))
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))

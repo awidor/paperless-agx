@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -13,18 +14,38 @@ use axum::{
 };
 use chrono::{DateTime, Datelike, TimeDelta, TimeZone, Utc};
 use futures::TryStreamExt;
+use paperless_ingest::embed_pending_chunks;
 use paperless_models::{
-    Document, DocumentPageResult, DocumentPatch, DocumentQuery, DocumentSort, HealthResponse,
-    IngestionStatus, MediaType, MetadataSource, PageInfo, SearchAnswerRequest,
-    SearchAnswerResponse, SearchHit, SearchInterpretation, SearchPassage, SearchRequest,
-    SearchResponse, UploadMetadata,
+    AgentSearchRequest, Document, DocumentPageResult, DocumentPatch, DocumentQuery, DocumentSort,
+    HealthResponse, IngestionStatus, MediaType, MetadataSource, PageInfo, PassageKind, SearchHit,
+    SearchInterpretation, SearchPassage, SearchRequest, SearchResponse, UploadMetadata,
 };
 use paperless_search::{RankedChunk, collapse_to_documents, reciprocal_rank_fusion};
 use paperless_storage::{ChunkMatch, SearchFilter, StoredObject};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
+use url::Url;
 
-use crate::AppState;
+use crate::{AgentConfig, AppState};
+
+/// Forwards agent searches to the search agent service and streams its events back.
+#[derive(Clone)]
+pub struct AgentProxy {
+    client: reqwest::Client,
+    endpoint: Url,
+}
+
+impl AgentProxy {
+    pub fn new(config: &AgentConfig) -> Result<Self> {
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .build()
+                .context("build search agent client")?,
+            endpoint: config.url.join("search").context("search agent URL")?,
+        })
+    }
+}
 
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -35,6 +56,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         metadata_model: state.ocr.metadata_model().to_owned(),
         embedding_configured: state.embeddings.is_some(),
         embedding_model: state.embedding_model.clone(),
+        agent_configured: state.agent.is_some(),
     })
 }
 
@@ -139,6 +161,7 @@ pub async fn upload_document(
         last_error: None,
         retry_count: 0,
         deleted_at: None,
+        summary: None,
     };
     state.documents.insert(&document).await?;
     state.ingestion.enqueue(document.document_id).await?;
@@ -264,7 +287,11 @@ pub async fn search(
     let filter = search_filter(&effective_request);
     let lexical = state
         .chunks
-        .lexical_candidates(&request.query, filter.clone(), 50)
+        .lexical_candidates(
+            &keyword_query(&request.query, &interpretation),
+            filter.clone(),
+            50,
+        )
         .await?;
     let vector = state
         .chunks
@@ -317,6 +344,11 @@ pub async fn search(
                 page: chunk.page_start,
                 char_start: chunk.char_start,
                 char_end: chunk.char_end,
+                kind: if chunk.is_summary() {
+                    PassageKind::Summary
+                } else {
+                    PassageKind::Page
+                },
                 snippet: chunk.text,
                 score,
             });
@@ -342,66 +374,45 @@ pub async fn search(
     }))
 }
 
-pub async fn answer_search(
+/// Streams the search agent's server-sent events: `progress` while it looks things up, then
+/// one `result` or `error`.
+pub async fn agent_search(
     State(state): State<AppState>,
-    Json(request): Json<SearchAnswerRequest>,
-) -> Result<Json<SearchAnswerResponse>, AppError> {
+    Json(request): Json<AgentSearchRequest>,
+) -> Result<Response, AppError> {
+    let agent = state.agent.as_ref().ok_or_else(|| {
+        AppError::service_unavailable(anyhow::anyhow!("search agent is not configured"))
+    })?;
     if request.query.trim().is_empty() {
         return Err(AppError::bad_request(anyhow::anyhow!(
-            "search question must not be empty"
+            "search query must not be empty"
         )));
     }
-    let unique = request.chunk_ids.iter().copied().collect::<HashSet<_>>();
-    if !(1..=12).contains(&request.chunk_ids.len()) || unique.len() != request.chunk_ids.len() {
-        return Err(AppError::bad_request(anyhow::anyhow!(
-            "chunk_ids must contain between 1 and 12 unique IDs"
+    let response = agent
+        .client
+        .post(agent.endpoint.clone())
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| {
+            AppError::service_unavailable(
+                anyhow::Error::from(error).context("reach the search agent"),
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(AppError::service_unavailable(anyhow::anyhow!(
+            "search agent failed with {status}: {body}"
         )));
     }
-
-    let mut sources = Vec::with_capacity(request.chunk_ids.len());
-    for chunk_id in &request.chunk_ids {
-        let chunk =
-            state.chunks.get(*chunk_id).await?.ok_or_else(|| {
-                AppError::bad_request(anyhow::anyhow!("unknown chunk ID {chunk_id}"))
-            })?;
-        let document = active_document(&state, chunk.document_id).await?;
-        sources.push(format!(
-            "{}, page {}:\n{}",
-            document.title.as_deref().unwrap_or(&document.filename),
-            chunk.page_start,
-            chunk.text
-        ));
-    }
-
-    let generated = state
-        .ocr
-        .answer_question(request.query.trim(), &sources)
-        .await?;
-    let Some(answer) = generated.answer.filter(|value| !value.trim().is_empty()) else {
-        return Ok(Json(SearchAnswerResponse {
-            answer: None,
-            citations: Vec::new(),
-        }));
-    };
-    if generated.citations.is_empty()
-        || generated
-            .citations
-            .iter()
-            .any(|index| *index >= request.chunk_ids.len())
-    {
-        return Ok(Json(SearchAnswerResponse {
-            answer: None,
-            citations: Vec::new(),
-        }));
-    }
-    Ok(Json(SearchAnswerResponse {
-        answer: Some(answer),
-        citations: generated
-            .citations
-            .into_iter()
-            .map(|index| request.chunk_ids[index])
-            .collect(),
-    }))
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(response.bytes_stream()))
+        .context("build search agent stream")
+        .map_err(AppError::from)
 }
 
 pub async fn openapi() -> Json<serde_json::Value> {
@@ -529,6 +540,10 @@ pub async fn infer_document_metadata(
         .apply_inferred(document_id, inferred)
         .await
         .map_err(AppError::bad_request)?;
+    if let Some(embeddings) = &state.embeddings {
+        // A new summary passage is stored without a vector.
+        embed_pending_chunks(&state.chunks, embeddings).await?;
+    }
     Ok(Json(document))
 }
 
@@ -652,6 +667,39 @@ fn infer_search_interpretation(
         }
     }
     interpretation
+}
+
+/// Leaves out words that became an inferred sender or date filter: the filter already
+/// enforces them, and most passages never repeat the sender's name or the month.
+fn keyword_query(query: &str, interpretation: &SearchInterpretation) -> String {
+    let sender_words = interpretation
+        .sender
+        .as_deref()
+        .map(normalized_words)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let dates_inferred =
+        interpretation.created_from.is_some() || interpretation.created_to.is_some();
+    query
+        .split_whitespace()
+        .filter(|term| {
+            let words = normalized_words(term);
+            words.is_empty()
+                || !words.iter().all(|word| {
+                    sender_words.contains(word) || (dates_inferred && is_date_word(word))
+                })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_date_word(word: &str) -> bool {
+    month_number(word).is_some()
+        || is_this(word)
+        || is_last(word)
+        || matches!(word, "year" | "jahr" | "month" | "monat")
+        || (word.len() == 4 && word.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn normalized_words(value: &str) -> Vec<String> {
@@ -910,7 +958,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use paperless_models::SearchRequest;
 
-    use super::infer_search_interpretation;
+    use super::{infer_search_interpretation, keyword_query};
 
     fn request(query: &str) -> SearchRequest {
         SearchRequest {
@@ -995,6 +1043,20 @@ mod tests {
         assert_eq!(
             infer_search_interpretation(&request("reference 7319"), &[], now).created_from,
             None
+        );
+    }
+
+    #[test]
+    fn keyword_query_leaves_out_words_used_as_filters() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap();
+        let senders = vec!["IKK classic".to_owned()];
+        let query = "Beitrag IKK classic März 2025";
+        let interpretation = infer_search_interpretation(&request(query), &senders, now);
+        assert_eq!(keyword_query(query, &interpretation), "Beitrag");
+        let unfiltered = infer_search_interpretation(&request("reference 7319"), &senders, now);
+        assert_eq!(
+            keyword_query("reference 7319", &unfiltered),
+            "reference 7319"
         );
     }
 }

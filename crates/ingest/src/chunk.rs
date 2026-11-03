@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use paperless_models::{Chunk, Document, DocumentPage};
+use paperless_models::{Chunk, Document, DocumentPage, summary_chunk_id};
 
 pub const TARGET_CHUNK_CHARS: usize = 3_000;
 
@@ -39,6 +39,25 @@ pub fn chunk_document(document: &Document, pages: &[DocumentPage]) -> Result<Vec
         document_char_base = document_char_base
             .checked_add(page.text.chars().count() + 2)
             .ok_or_else(|| anyhow::anyhow!("document character offsets overflow"))?;
+    }
+    // After the page passages, so their ordinals do not depend on the summary.
+    if let Some(summary) = document
+        .summary
+        .as_ref()
+        .filter(|summary| !summary.trim().is_empty())
+    {
+        chunks.push(Chunk {
+            chunk_id: summary_chunk_id(document.document_id),
+            document_id: document.document_id,
+            page_start: 1,
+            page_end: 1,
+            char_start: 0,
+            char_end: 0,
+            text: summary.clone(),
+            embedding: Vec::new(),
+            created_at: document.created_at,
+            sender: document.sender.clone(),
+        });
     }
     Ok(chunks)
 }
@@ -176,6 +195,7 @@ mod tests {
             last_error: None,
             retry_count: 0,
             deleted_at: None,
+            summary: None,
         };
         let pages = vec![
             DocumentPage {
@@ -203,5 +223,14 @@ mod tests {
         assert_eq!(first[0].char_start, 0);
         assert_eq!(first[1].page_start, 2);
         assert_eq!(first[1].char_start, 34);
+
+        let summarized = Document {
+            summary: Some("Zwei Seiten Testtext.".into()),
+            ..document
+        };
+        let with_summary = chunk_document(&summarized, &pages).unwrap();
+        assert_eq!(with_summary.len(), 3);
+        assert_eq!(with_summary[..2], first[..]);
+        assert!(with_summary[2].is_summary());
     }
 }

@@ -11,7 +11,7 @@ use http_body_util::BodyExt;
 use image::{DynamicImage, ImageFormat};
 use paperless_models::{Document, IngestionStatus, MediaType};
 use paperless_ocr_client::{LlmConfig, OcrConfig};
-use paperless_server::{AppConfig, EmbeddingConfig, build_app};
+use paperless_server::{AgentConfig, AppConfig, EmbeddingConfig, build_app};
 use paperless_storage::{DataLayout, DocumentRepository, ObjectStore};
 use tower::ServiceExt;
 use url::Url;
@@ -24,6 +24,7 @@ fn config(data_dir: &Path, base_url: Url) -> AppConfig {
         render_concurrency: 2,
         eager_thumbnail_pages: 3,
         embeddings: None,
+        agent: None,
         llm: LlmConfig {
             base_url: base_url.clone(),
             model: "z-ai/glm-5.3-flash".into(),
@@ -70,27 +71,15 @@ async fn start_ocr_with_text(text: String) -> Url {
                     let content = body["messages"][0]["content"].as_array();
                     let is_ocr =
                         content.is_some_and(|items| items.iter().any(|item| item["type"] == "image_url"));
-                    let is_answer = content.is_some_and(|items| {
-                        items.iter().any(|item| {
-                            item["text"]
-                                .as_str()
-                                .is_some_and(|text| text.contains("numbered evidence passages"))
-                        })
-                    });
                     let content = if is_ocr {
                         format!(
                             "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>{text}</p></div>"
                         )
-                    } else if is_answer {
-                        serde_json::json!({
-                            "answer": "The page contains recognized text.",
-                            "citations": [1]
-                        })
-                        .to_string()
                     } else {
                         serde_json::json!({
                             "title": "Extracted title",
-                            "created_at": null
+                            "created_at": null,
+                            "summary": "Testschreiben mit Kundennummer 4711."
                         })
                         .to_string()
                     };
@@ -303,55 +292,74 @@ async fn upload_with_embeddings_reaches_ready_and_is_searchable() {
         results["items"][0]["best_chunk_id"],
         passages[0]["chunk_id"]
     );
-    let chunk_id = passages[0]["chunk_id"].as_u64().unwrap();
+
+    // The summary is indexed as its own passage; "Kundennr" matches inside "Kundennummer".
     let response = app
         .clone()
         .oneshot(
-            Request::post("/api/search/answer")
+            Request::post("/api/search")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({
-                        "query": "What does the page contain?",
-                        "chunk_ids": [chunk_id]
-                    })
-                    .to_string(),
+                    serde_json::json!({"query": "Kundennr", "page": 1, "page_size": 10})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let results: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let passages = results["items"][0]["passages"].as_array().unwrap();
+    assert_eq!(passages[0]["kind"], "summary");
+    assert_eq!(
+        passages[0]["snippet"],
+        "Testschreiben mit Kundennummer 4711."
+    );
+}
+
+#[tokio::test]
+async fn agent_search_streams_the_agent_events() {
+    const EVENTS: &str = "event: progress\ndata: {\"label\":\"Searching\"}\n\nevent: result\ndata: {\"answer\":null,\"results\":[]}\n\n";
+    let agent = Router::new().route(
+        "/search",
+        post(|Json(body): Json<serde_json::Value>| async move {
+            assert_eq!(body["query"], "Beitrag Krankenkasse");
+            assert_eq!(body["sender"], "IKK classic");
+            ([(header::CONTENT_TYPE, "text/event-stream")], EVENTS)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, agent).await.unwrap();
+    });
+    let temporary = tempfile::tempdir().unwrap();
+    let mut settings = config(temporary.path(), start_ocr().await);
+    settings.agent = Some(AgentConfig {
+        url: Url::parse(&format!("http://{address}")).unwrap(),
+    });
+    let app = build_app(settings).await.unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/search/agent")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"query": "Beitrag Krankenkasse", "sender": "IKK classic"})
+                        .to_string(),
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let answer: serde_json::Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(answer["answer"], "The page contains recognized text.");
-    assert_eq!(answer["citations"], serde_json::json!([chunk_id]));
-}
-
-#[tokio::test]
-async fn answer_search_rejects_invalid_questions_and_chunk_lists() {
-    let temporary = tempfile::tempdir().unwrap();
-    let app = build_app(config(temporary.path(), start_ocr().await))
-        .await
-        .unwrap();
-
-    for body in [
-        serde_json::json!({"query": " ", "chunk_ids": [1]}),
-        serde_json::json!({"query": "invoice total", "chunk_ids": []}),
-        serde_json::json!({"query": "invoice total", "chunk_ids": [1, 1]}),
-        serde_json::json!({"query": "invoice total", "chunk_ids": (1..=13).collect::<Vec<_>>()}),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::post("/api/search/answer")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body, EVENTS.as_bytes());
 }
 
 #[test]
@@ -617,6 +625,7 @@ async fn startup_resumes_a_stored_image() {
         last_error: None,
         retry_count: 0,
         deleted_at: None,
+        summary: None,
     };
     repository.insert(&document).await.unwrap();
     drop(repository);
@@ -657,6 +666,7 @@ async fn startup_resumes_an_image_at_the_ocr_stage() {
         last_error: None,
         retry_count: 0,
         deleted_at: None,
+        summary: None,
     };
     repository.insert(&document).await.unwrap();
     drop(repository);
@@ -693,6 +703,7 @@ async fn startup_finishes_an_interrupted_index_commit() {
         last_error: None,
         retry_count: 0,
         deleted_at: None,
+        summary: None,
     };
     repository.insert(&document).await.unwrap();
     drop(repository);
@@ -739,6 +750,7 @@ async fn startup_repeats_deleted_object_cleanup_safely() {
         last_error: None,
         retry_count: 0,
         deleted_at: Some(now),
+        summary: None,
     };
     repository.insert(&document).await.unwrap();
     drop(repository);

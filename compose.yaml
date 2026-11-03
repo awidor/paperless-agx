@@ -13,3 +13,15 @@ services:
     volumes:
       - ./data:/data
       - ./config/paperless-agx.docker.toml:/opt/paperless/config/paperless-agx.toml:ro
+
+  # Search agent behind /api/search/agent. Paperless reaches it at paperless-agent:3100.
+  paperless-agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    image: paperless-agent:local
+    restart: unless-stopped
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    volumes:
+      - ./config/paperless-agent.toml:/opt/agent/config/paperless-agent.toml:ro

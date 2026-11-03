@@ -12,7 +12,11 @@ export type SearchInterpretation = components["schemas"]["SearchInterpretation"]
 export type SearchHit = components["schemas"]["SearchHit"];
 export type SearchRequest = components["schemas"]["SearchRequest"];
 export type SearchResponse = components["schemas"]["SearchResponse"];
-export type SearchAnswerResponse = components["schemas"]["SearchAnswerResponse"];
+export type PassageKind = components["schemas"]["PassageKind"];
+export type AgentSearchRequest = components["schemas"]["AgentSearchRequest"];
+export type AgentProgress = components["schemas"]["AgentProgress"];
+export type AgentResultItem = components["schemas"]["AgentResultItem"];
+export type AgentSearchResult = components["schemas"]["AgentSearchResult"];
 
 async function responseBody<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -94,12 +98,41 @@ export function searchDocuments(payload: SearchRequest): Promise<SearchResponse>
   });
 }
 
-export function answerSearch(query: string, chunkIds: number[]): Promise<SearchAnswerResponse> {
-  return request("/api/search/answer", {
+/** Runs the search agent, reporting each lookup it makes, and resolves with its ranked results. */
+export async function streamAgentSearch(
+  payload: AgentSearchRequest,
+  onProgress: (progress: AgentProgress) => void,
+  signal: AbortSignal,
+): Promise<AgentSearchResult> {
+  const response = await fetch("/api/search/agent", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ query, chunk_ids: chunkIds }),
+    body: JSON.stringify(payload),
+    signal,
   });
+  if (!response.ok || !response.body) {
+    await responseBody(response);
+    throw new Error("The search agent did not respond.");
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    for (let boundary = buffer.indexOf("\n\n"); boundary >= 0; boundary = buffer.indexOf("\n\n")) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const event = /^event: (.*)$/m.exec(block)?.[1];
+      const data = block.split("\n").filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n");
+      if (!event || !data) continue;
+      const message = JSON.parse(data);
+      if (event === "progress") onProgress(message as AgentProgress);
+      else if (event === "result") return message as AgentSearchResult;
+      else if (event === "error") throw new Error((message as { message: string }).message);
+    }
+  }
+  throw new Error("The search agent stopped without results.");
 }
 
 export function getSenders(): Promise<string[]> {

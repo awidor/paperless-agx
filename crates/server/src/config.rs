@@ -16,6 +16,12 @@ pub struct EmbeddingConfig {
     pub max_concurrency: usize,
 }
 
+/// The search agent service (`agent/`); `/api/search/agent` forwards to it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentConfig {
+    pub url: Url,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub data_dir: PathBuf,
@@ -25,6 +31,8 @@ pub struct AppConfig {
     pub eager_thumbnail_pages: u32,
     #[serde(default)]
     pub embeddings: Option<EmbeddingConfig>,
+    #[serde(default)]
+    pub agent: Option<AgentConfig>,
     pub llm: LlmConfig,
     pub ocr: OcrConfig,
 }
@@ -87,6 +95,10 @@ base_url = "https://openrouter.ai/api/v1"
 model = "google/gemini-embedding-2"
 api_key_env = "OPENROUTER_API_KEY"
 max_concurrency = 2
+
+[agent]
+url = "http://paperless-agent:3100"
+
 [ocr]
 base_url = "http://127.0.0.1:8765/v1"
 model = "surya"
@@ -120,6 +132,10 @@ max_concurrency = 1
             "OPENROUTER_API_KEY"
         );
         assert_eq!(config.embeddings.as_ref().unwrap().max_concurrency, 2);
+        assert_eq!(
+            config.agent.as_ref().unwrap().url.as_str(),
+            "http://paperless-agent:3100/"
+        );
         assert_eq!(config.ocr.pages_per_request, 2);
         assert_eq!(config.ocr.model, "surya");
         assert_eq!(config.ocr.profile, paperless_ocr_client::OcrProfile::Surya);

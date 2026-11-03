@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FileText, LoaderCircle } from "lucide-react";
 import {
-  answerSearch,
   getDocument,
   getPages,
+  type AgentProgress,
+  type AgentResultItem,
+  type AgentSearchResult,
   type Document,
   type PageInfo,
-  type SearchAnswerResponse,
   type SearchHit,
   type SearchPassage,
 } from "./api";
@@ -15,7 +16,21 @@ import { Marked } from "./library";
 import { OcrTextLayer } from "./OcrTextLayer";
 import { PdfViewer } from "./PdfViewer";
 
-export type SearchResult = { document: Document; hit?: SearchHit };
+export type SearchResult = { document: Document; hit?: SearchHit; reason?: string };
+
+export type AgentSearchState =
+  | { status: "running"; progress: AgentProgress[] }
+  | { status: "done"; result: AgentSearchResult }
+  | { status: "failed"; message: string };
+
+export function agentSearchResult(item: AgentResultItem): SearchResult {
+  const { document, passage, reason } = item;
+  return {
+    document,
+    reason,
+    hit: { document, best_chunk_id: passage.chunk_id, page: passage.page, snippet: passage.snippet, score: passage.score, passages: [passage] },
+  };
+}
 
 type Selection = { documentId: number; chunkId: number | null };
 type EvidenceTarget = { result: SearchResult; passage: SearchPassage };
@@ -30,7 +45,13 @@ function passagesFor(result: SearchResult): SearchPassage[] {
     char_end: result.hit.snippet.length,
     snippet: result.hit.snippet,
     score: result.hit.score,
+    kind: "page",
   }];
+}
+
+/** Text to mark on the page: summaries and bare page references have no place on it. */
+function pageHighlight(passage: SearchPassage | undefined): string | undefined {
+  return passage?.kind === "page" && passage.snippet ? passage.snippet : undefined;
 }
 
 function firstSelection(result: SearchResult): Selection {
@@ -41,11 +62,13 @@ function formatDate(document: Document): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(document.created_at || document.added_at));
 }
 
-export function SearchWorkspace({ query, results, terms, loading, onOpen }: {
-  query: string;
+export function SearchWorkspace({ results, terms, loading, agent, agentRanked, onOpen }: {
   results: SearchResult[];
   terms: string[];
   loading: boolean;
+  agent: AgentSearchState | null;
+  /** The results are the agent's ranking rather than the instant keyword and meaning matches. */
+  agentRanked: boolean;
   onOpen: (document: Document, page: number, highlight?: string) => void;
 }) {
   const [selection, setSelection] = useState<Selection>(() => firstSelection(results[0]));
@@ -53,9 +76,6 @@ export function SearchWorkspace({ query, results, terms, loading, onOpen }: {
   const [pages, setPages] = useState<PageInfo[]>([]);
   const [previewLoading, setPreviewLoading] = useState(true);
   const [previewError, setPreviewError] = useState("");
-  const [answer, setAnswer] = useState<SearchAnswerResponse | null>(null);
-  const [answerLoading, setAnswerLoading] = useState(false);
-  const [answerError, setAnswerError] = useState("");
   const previewRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -71,7 +91,8 @@ export function SearchWorkspace({ query, results, terms, loading, onOpen }: {
     ? passagesFor(selectedResult).find((passage) => passage.chunk_id === selection.chunkId) ?? passagesFor(selectedResult)[0]
     : undefined;
   const page = selectedPassage?.page ?? selectedResult?.hit?.page ?? 1;
-  const highlight = selectedPassage?.snippet ?? selectedResult?.hit?.snippet;
+  const highlight = pageHighlight(selectedPassage);
+  const evidenceText = selectedPassage?.snippet || selectedResult?.reason;
 
   useEffect(() => {
     if (!selectedResult) return;
@@ -95,46 +116,21 @@ export function SearchWorkspace({ query, results, terms, loading, onOpen }: {
     };
   }, [selectedResult?.document.document_id, selectedResult?.document.status]);
 
-  const answerTargets = useMemo(() => {
-    const targets = new Map<number, EvidenceTarget>();
-    for (const result of results) {
-      for (const passage of passagesFor(result)) {
-        if (!targets.has(passage.chunk_id)) targets.set(passage.chunk_id, { result, passage });
-      }
-    }
-    return [...targets.values()].sort((left, right) => right.passage.score - left.passage.score).slice(0, 12);
-  }, [results]);
-  const answerKey = answerTargets.map(({ passage }) => passage.chunk_id).join(",");
-
-  useEffect(() => {
-    setAnswer(null);
-    setAnswerError("");
-    if (!answerKey) {
-      setAnswerLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setAnswerLoading(true);
-    void answerSearch(query, answerTargets.map(({ passage }) => passage.chunk_id))
-      .then((response) => {
-        if (!cancelled) setAnswer(response);
-      })
-      .catch(() => {
-        if (!cancelled) setAnswerError("An answer could not be prepared. The evidence results are still available.");
-      })
-      .finally(() => {
-        if (!cancelled) setAnswerLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [answerKey, query]);
-
-  const citedTargets = answer?.citations.flatMap((chunkId) => {
-    const target = answerTargets.find(({ passage }) => passage.chunk_id === chunkId);
-    return target ? [target] : [];
-  }).filter((target, index, all) => all.findIndex(({ passage }) => passage.chunk_id === target.passage.chunk_id) === index) ?? [];
-  const supportedAnswer = answer?.answer && citedTargets.length > 0 ? answer.answer : null;
+  const agentResult = agentRanked && agent?.status === "done" ? agent.result : null;
+  const citedTargets: EvidenceTarget[] = agentResult?.answer
+    ? agentResult.citations.flatMap((index) => {
+      const result = results[index];
+      const passage = result && passagesFor(result)[0];
+      return result && passage ? [{ result, passage }] : [];
+    })
+    : [];
+  const supportedAnswer = agentResult?.answer && citedTargets.length > 0 ? agentResult.answer : null;
+  const latestProgress = agent?.status === "running" ? agent.progress.at(-1) : undefined;
+  const agentNote = agent?.status === "failed"
+    ? `The search agent could not finish (${agent.message}). These are keyword and meaning matches.`
+    : agent?.status === "done" && !agentRanked
+      ? "The search agent found no clear match. These are keyword and meaning matches."
+      : null;
   const previewMatchesSelection = document?.document_id === selectedResult?.document.document_id;
   const currentPage = previewMatchesSelection ? pages.find((candidate) => candidate.page === page) : undefined;
   const previewDocument = previewMatchesSelection ? document : selectedResult?.document;
@@ -157,8 +153,12 @@ export function SearchWorkspace({ query, results, terms, loading, onOpen }: {
         </button>)}
       </div>
     </section>}
-    {answerLoading && <p className="answer-status" role="status"><LoaderCircle className="spin" size={13} aria-hidden="true" /> Finding a supported answer…</p>}
-    {answerError && <p className="answer-status" role="status">{answerError}</p>}
+    {agent?.status === "running" && <p className="answer-status" role="status">
+      <LoaderCircle className="spin" size={13} aria-hidden="true" />
+      {latestProgress?.label ?? "Starting the search agent"}…{agent.progress.length > 1 && <span className="agent-steps">step {agent.progress.length}</span>}
+    </p>}
+    {agentNote && <p className="answer-status" role="status">{agentNote}</p>}
+    {agentRanked && !supportedAnswer && <p className="answer-status">Ranked by the search agent</p>}
 
     <div className="search-workspace">
       <section className="result-rail" aria-label="Matching documents">
@@ -173,6 +173,7 @@ export function SearchWorkspace({ query, results, terms, loading, onOpen }: {
                 <small>{formatDate(result.document)}{result.document.page_count ? ` · ${result.document.page_count} p.` : ""}</small>
               </span>
             </button>
+            {result.reason && <p className="result-reason">{result.reason}</p>}
             {passages.length > 0 ? <div className="result-passages" aria-label={`Evidence in ${result.document.title || result.document.filename}`}>
               {passages.map((passage) => <button
                 key={passage.chunk_id}
@@ -180,8 +181,8 @@ export function SearchWorkspace({ query, results, terms, loading, onOpen }: {
                 className={selected && selectedPassage?.chunk_id === passage.chunk_id ? "selected" : ""}
                 onClick={() => selectTarget({ result, passage })}
               >
-                <span className="passage-page">Page {passage.page}</span>
-                <Marked text={passage.snippet} terms={terms} />
+                <span className="passage-page">{passage.kind === "summary" ? "Summary" : `Page ${passage.page}`}</span>
+                {passage.snippet && <Marked text={passage.snippet} terms={terms} />}
               </button>)}
             </div> : <p className="metadata-match">Matched document details · page 1</p>}
           </article>;
@@ -197,7 +198,7 @@ export function SearchWorkspace({ query, results, terms, loading, onOpen }: {
           {selectedResult && <button className="open-document" onClick={() => onOpen(selectedResult.document, page, highlight)}><FileText size={16} aria-hidden="true" /> Open document</button>}
         </header>
         <blockquote className="evidence-strip">
-          {highlight ? <Marked text={highlight} terms={terms} /> : "This document matched its title, sender, or date."}
+          {evidenceText ? <Marked text={evidenceText} terms={terms} /> : "This document matched its title, sender, or date."}
         </blockquote>
         <div className="evidence-page" aria-busy={previewLoading || !previewMatchesSelection}>
           {previewError ? <p className="preview-status viewer-error">{previewError}</p>

@@ -37,7 +37,48 @@ impl MetadataService {
                 document.created_at_source = Some(MetadataSource::Ai);
             }
         }
-        self.persist(&document).await
+        let summary_changed = self.take_summary(&mut document, inferred.summary)?;
+        let document = self.persist(&document).await?;
+        if summary_changed {
+            self.store_summary_passage(&document).await?;
+        }
+        Ok(document)
+    }
+
+    /// Sets only the summary, for documents indexed before summaries existed. The new summary
+    /// passage waits for `embed_pending_chunks`.
+    pub async fn apply_summary(&self, document_id: u64, summary: Option<String>) -> Result<bool> {
+        let mut document = self.active(document_id).await?;
+        if !self.take_summary(&mut document, summary)? {
+            return Ok(false);
+        }
+        let document = self.persist(&document).await?;
+        self.store_summary_passage(&document).await?;
+        Ok(true)
+    }
+
+    fn take_summary(&self, document: &mut Document, summary: Option<String>) -> Result<bool> {
+        let Some(summary) = clean(summary, 2_000, "summary")? else {
+            return Ok(false);
+        };
+        if document.summary.as_ref() == Some(&summary) {
+            return Ok(false);
+        }
+        document.summary = Some(summary);
+        Ok(true)
+    }
+
+    /// Keeps the searchable summary passage in step with the document. During ingestion the
+    /// chunks are rebuilt right after this, which replaces it with an embedded copy.
+    async fn store_summary_passage(&self, document: &Document) -> Result<()> {
+        self.chunks
+            .replace_summary(
+                document.document_id,
+                document.summary.clone(),
+                document.sender.clone(),
+                document.created_at,
+            )
+            .await
     }
 
     pub async fn apply_manual(&self, document_id: u64, patch: DocumentPatch) -> Result<Document> {
@@ -133,6 +174,7 @@ mod tests {
             last_error: None,
             retry_count: 0,
             deleted_at: None,
+            summary: None,
         };
         documents.insert(&document).await.unwrap();
         chunks
@@ -172,6 +214,7 @@ mod tests {
                     title: Some("AI title".into()),
                     sender: None,
                     created_at: Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()),
+                    summary: None,
                 },
             )
             .await
@@ -208,6 +251,7 @@ mod tests {
             last_error: None,
             retry_count: 0,
             deleted_at: None,
+            summary: None,
         };
         documents.insert(&document).await.unwrap();
         let service = MetadataService::new(documents, chunks);
@@ -229,6 +273,7 @@ mod tests {
                     title: Some("AI title".into()),
                     sender: None,
                     created_at: None,
+                    summary: None,
                 },
             )
             .await

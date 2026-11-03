@@ -19,6 +19,7 @@ paperless-models = { path = "../models" }
 paperless-ocr-client = { path = "../ocr-client" }
 paperless-search = { path = "../search" }
 paperless-storage = { path = "../storage" }
+reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
