@@ -104,7 +104,8 @@ export function bindPageTextSelection(layer: HTMLElement): () => void {
     if (!selection || selection.isCollapsed) return;
     const origin = layer.getBoundingClientRect();
     const spanLimit = window.document.createRange();
-    context.fillStyle = getComputedStyle(layer).getPropertyValue("--pen").trim() || "#366247";
+    const style = getComputedStyle(layer);
+    context.fillStyle = style.getPropertyValue("--selection-fill").trim() || style.color;
     for (let index = 0; index < selection.rangeCount; index++) {
       const range = selection.getRangeAt(index);
       if (!range.intersectsNode(layer)) continue;

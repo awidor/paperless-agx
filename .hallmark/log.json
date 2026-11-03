@@ -1,0 +1,30 @@
+[
+ {
+  "mode": "build",
+  "scope": "app",
+  "shape": "app screen",
+  "theme": "coral",
+  "axes": "light/grotesk-sans/warm",
+  "hero": "none (app screen)",
+  "nav": "top bar: wordmark, centred search, upload as the one filled action",
+  "footer": "none",
+  "imagery": "the product: document page renders",
+  "photos": [],
+  "entry": "none",
+  "fingerprint": "app/top-bar/sheet-grid+ledger/answer-over-cited-page/full-screen-reader/light+dark",
+  "sections": [
+   "library shelf grouped by month",
+   "library ledger",
+   "search: answer card, results rail, cited page",
+   "reader: page rail, page on the desk, details panel",
+   "upload tray",
+   "drop overlay"
+  ],
+  "signature": "the agent answer over the page it came from, passage marked in coral",
+  "waived": [
+   "39b"
+  ],
+  "prompt": "Completely redesign the current UI from scratch, more modern and nicer to use",
+  "date": "2026-11-03"
+ }
+]

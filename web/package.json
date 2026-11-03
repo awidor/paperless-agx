@@ -4,17 +4,16 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "bun run fonts && vite",
     "generate:api": "openapi-typescript ../openapi.json -o src/api.generated.ts",
     "typecheck": "tsc --noEmit",
     "test:unit": "bun ./src/evidenceHighlight.test.ts",
     "test:e2e": "playwright test",
-    "build": "bun run generate:api && tsc --noEmit && vite build"
+    "build": "bun run fonts && bun run generate:api && tsc --noEmit && vite build",
+    "fonts": "bun scripts/fonts.ts"
   },
   "dependencies": {
-    "@fontsource/ibm-plex-mono": "^5.3.0",
-    "@fontsource/ibm-plex-sans": "^5.3.0",
-    "@fontsource/source-serif-4": "^5.3.0",
+    "@fontsource/geist-mono": "5.3.0",
     "@vitejs/plugin-react": "5.1.1",
     "lucide-react": "0.468.0",
     "pdfjs-dist": "5.4.394",

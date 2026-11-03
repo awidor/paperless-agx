@@ -1,9 +1,21 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { pageImage, sampleDocuments, samplePage, samplePdf } from "./fixtures/documents";
 
 const url = "http://127.0.0.1:5173";
 const sampleDocument = sampleDocuments[0];
 const darkFilter = "invert(0.9) hue-rotate(180deg)";
+
+/** The computed value of a colour token, resolved the way the browser paints it. */
+async function token(page: Page, name: string): Promise<string> {
+  return page.evaluate((property) => {
+    const probe = document.createElement("div");
+    probe.style.color = `var(${property})`;
+    document.body.append(probe);
+    const value = getComputedStyle(probe).color;
+    probe.remove();
+    return value;
+  }, name);
+}
 
 test.beforeEach(async ({ context }) => {
   await context.route("**/api/**", async (route) => {
@@ -53,7 +65,8 @@ test("system preference follows changes; manual choices persist and sync across 
   await page.reload();
   await expect(theme).toHaveValue("dark");
   await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
-  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#181818");
+  const darkPaper = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--color-paper").trim());
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", darkPaper);
 
   const other = await context.newPage();
   await other.emulateMedia({ colorScheme: "dark" });
@@ -89,24 +102,23 @@ test("dark library, image previews and OCR pages share a neutral palette", async
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto(url);
-  await page.getByRole("button", { name: "Filters", exact: true }).click();
-  await expect(page.locator(".document-card").first()).toHaveCSS("background-color", "rgb(34, 34, 34)");
-  await expect(page.locator(".thumbnail-wrap img").first()).toHaveCSS("filter", darkFilter);
+  await expect(page.locator(".sheet--thumb").first()).toHaveCSS("background-color", await token(page, "--color-sheet"));
+  await expect(page.locator(".sheet--thumb img").first()).toHaveCSS("filter", darkFilter);
   await expect(page.getByLabel("From", { exact: true })).toHaveCSS("color-scheme", "dark");
   await page.evaluate(() => document.fonts.ready);
   await page.screenshot({ path: testInfo.outputPath("dark-library.png"), fullPage: false, animations: "disabled" });
   await page.getByRole("combobox", { name: "Color theme" }).selectOption("light");
-  await expect(page.locator(".thumbnail-wrap img").first()).toHaveCSS("filter", "none");
+  await expect(page.locator(".sheet--thumb img").first()).toHaveCSS("filter", "none");
   await page.screenshot({ path: testInfo.outputPath("light-library.png"), fullPage: false, animations: "disabled" });
   await page.getByRole("combobox", { name: "Color theme" }).selectOption("dark");
   await page.getByRole("button", { name: "Open Electricity statement" }).click();
-  await expect(page.locator(".metadata-column input").first()).toHaveCSS("color", "rgb(230, 230, 227)");
+  await expect(page.locator(".reader__info input").first()).toHaveCSS("color", await token(page, "--color-ink"));
   await expect(page.locator(".image-page-frame > img")).toHaveCSS("filter", darkFilter);
   await expect(page.locator(".ocr-text-layer")).toHaveCSS("filter", "none");
   await page.screenshot({ path: testInfo.outputPath("dark-image.png"), fullPage: false });
   await page.getByRole("tab", { name: "OCR text" }).click();
-  await expect(page.locator(".digital-page")).toHaveCSS("background-color", "rgb(26, 26, 26)");
-  await expect(page.locator(".digital-block--title")).toHaveCSS("color", "rgb(214, 214, 214)");
+  await expect(page.locator(".digital-page")).toHaveCSS("background-color", await token(page, "--color-sheet"));
+  await expect(page.locator(".digital-block--title")).toHaveCSS("color", await token(page, "--color-sheet-ink"));
   await page.screenshot({ path: testInfo.outputPath("dark-document.png"), fullPage: false });
 });
 
@@ -136,8 +148,8 @@ test("PDF pages are dark while text selection and original file downloads remain
 test("search evidence and thumbnails also use dark document colors", async ({ page }, testInfo) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto(`${url}/?q=statement`);
-  await expect(page.locator(".result-heading img").first()).toHaveCSS("filter", darkFilter);
-  await expect(page.locator(".evidence-page .image-page-frame > img")).toHaveCSS("filter", darkFilter);
+  await expect(page.locator(".result__head img").first()).toHaveCSS("filter", darkFilter);
+  await expect(page.locator(".evidence__desk .image-page-frame > img")).toHaveCSS("filter", darkFilter);
   await page.evaluate(() => document.fonts.ready);
   await page.screenshot({ path: testInfo.outputPath("dark-search.png"), fullPage: false });
 });
@@ -153,10 +165,10 @@ test("theme selector remains keyboard accessible at mobile widths", async ({ pag
   await expect(theme).toHaveValue("dark");
   await expect(theme).toBeFocused();
   await page.keyboard.press("Escape");
-  await expect(page.locator(".health-pill")).toBeVisible();
+  await expect(page.locator(".health")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
   await page.screenshot({ path: testInfo.outputPath("dark-mobile.png"), fullPage: false, animations: "disabled" });
   await theme.selectOption("light");
-  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(250, 250, 249)");
+  await expect(page.locator("body")).toHaveCSS("background-color", await token(page, "--color-desk"));
   await page.screenshot({ path: testInfo.outputPath("light-mobile.png"), fullPage: false, animations: "disabled" });
 });

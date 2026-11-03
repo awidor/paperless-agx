@@ -1,14 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  FileSearch,
-  Grid2X2,
-  List,
-  LoaderCircle,
-  Search,
-  SlidersHorizontal,
-  Upload,
-  X,
-} from "lucide-react";
+import { Upload } from "lucide-react";
 import {
   getHealth,
   getSenders,
@@ -20,22 +11,14 @@ import {
   type HealthResponse,
   type LibraryQuery,
 } from "./api";
-import { DocumentDetail } from "./DocumentDetail";
-import { DocumentCard, FilterPanel, initialQuery } from "./library";
+import { activeFilterCount, FilterBar, FilterToggle, initialQuery, Library, type View } from "./Library";
+import { Reader } from "./Reader";
 import { useSearch } from "./search";
-import { SearchView } from "./SearchWorkspace";
-import { ThemeControl } from "./ThemeControl";
+import { SearchView } from "./SearchView";
+import { TopBar } from "./TopBar";
+import { Alert } from "./ui";
+import { UploadTray, type UploadState } from "./UploadTray";
 
-type View = "grid" | "list";
-type UploadState = {
-  active: boolean;
-  total: number;
-  completed: number;
-  current: string;
-  uploaded: number;
-  duplicates: number;
-  failures: string[];
-};
 type UrlState = {
   query: LibraryQuery;
   search: string;
@@ -55,6 +38,8 @@ const SORTS = new Set<DocumentSort>([
   "file_size_asc",
   "file_size_desc",
 ]);
+
+const ACCEPTED = "application/pdf,image/png,image/jpeg,image/tiff,image/webp";
 
 function positiveInteger(value: string | null, fallback: number): number {
   const parsed = Number(value);
@@ -108,6 +93,7 @@ export default function App() {
   const [dataVersion, setDataVersion] = useState(0);
   const [searchRun, setSearchRun] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const uploadingRef = useRef(false);
   const openedFromUi = useRef(false);
@@ -204,6 +190,20 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, [activeSearch, selected]);
 
+  // "/" jumps to the search field from anywhere outside a field or the reader.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true'], dialog[open]")) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const terms = useMemo(() => activeSearch.split(/\s+/).filter((term) => term.length >= 3), [activeSearch]);
 
   function checkpointHistory() {
@@ -243,7 +243,7 @@ export default function App() {
         if (result.duplicate) duplicates += 1;
         else uploaded += 1;
       } catch (cause) {
-        failures.push(`${file.name} — ${cause instanceof Error ? cause.message : "upload failed"}`);
+        failures.push(`${file.name}: ${cause instanceof Error ? cause.message : "upload failed"}`);
       }
     }
     uploadingRef.current = false;
@@ -288,6 +288,11 @@ export default function App() {
     setQuery({ ...next, page: 1 });
   }
 
+  function goToPage(page: number) {
+    setQuery((value) => ({ ...value, page }));
+    window.scrollTo({ top: 0 });
+  }
+
   function openDocument(document: Document, page = 1, highlight?: string) {
     checkpointHistory();
     openedFromUi.current = true;
@@ -308,158 +313,94 @@ export default function App() {
     setQuery((value) => ({ ...value, sender, page: 1 }));
   }
 
-  const activeFilters = [
-    query.sender && { key: "sender", label: `Sender: ${query.sender}`, clear: () => updateQuery({ ...query, sender: "" }) },
-    query.createdFrom && { key: "from", label: `From: ${query.createdFrom}`, clear: () => updateQuery({ ...query, createdFrom: "" }) },
-    query.createdTo && { key: "to", label: `To: ${query.createdTo}`, clear: () => updateQuery({ ...query, createdTo: "" }) },
-    !searching && query.sort !== initialQuery.sort && { key: "sort", label: "Custom sort", clear: () => updateQuery({ ...query, sort: initialQuery.sort }) },
-  ].filter((filter): filter is { key: string; label: string; clear: () => void } => Boolean(filter));
-  const shownFilters = activeFilters;
-
-  function clearAllFilters() {
-    updateQuery(initialQuery);
-  }
-  const nothingFiled = !searching && activeFilters.length === 0 && library?.total === 0;
-
-  const uploadMessage = uploadState?.active
-    ? `Uploading ${uploadState.completed + 1} of ${uploadState.total}: ${uploadState.current}`
-    : uploadState
-      ? [
-          uploadState.uploaded > 0 && `${uploadState.uploaded} queued for processing`,
-          uploadState.duplicates > 0 && `${uploadState.duplicates} already in the library`,
-          uploadState.failures.length > 0 && uploadState.failures.join(" · "),
-        ].filter(Boolean).join(" · ")
-      : "";
+  const chooseFiles = () => fileInputRef.current?.click();
+  const dismissUpload = useCallback(() => setUploadState(null), []);
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-name">Paperless</span>
-          <span className="brand-agx">AGX</span>
-        </div>
-        <form className="global-search" onSubmit={runSearch} aria-busy={searchBusy}>
-          <button className="search-submit" aria-label="Search"><Search size={18} aria-hidden="true" /></button>
-          <input
-            value={searchText}
-            onChange={(event) => setSearchText(event.target.value)}
-            placeholder="Ask, describe a document, or “quote” exact text"
-            aria-label="Search documents"
-          />
-          {searchBusy && <LoaderCircle className="spin search-progress" size={16} aria-label="Searching" />}
+    <div className="app">
+      <TopBar
+        inputRef={searchInputRef}
+        text={searchText}
+        searching={searching}
+        busy={searchBusy}
+        uploading={uploading}
+        health={health}
+        onText={setSearchText}
+        onSubmit={runSearch}
+        onClear={clearSearch}
+        onHome={clearSearch}
+        onUpload={chooseFiles}
+      />
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        hidden
+        disabled={uploading}
+        accept={ACCEPTED}
+        onChange={(event) => {
+          if (event.target.files) void upload(event.target.files);
+          event.target.value = "";
+        }}
+      />
+
+      <main className="main">
+        <div className="container">
+          {error && <Alert message={error} onDismiss={() => { setLibraryError(""); setContextError(""); }} />}
           {searching ? (
-            <button type="button" className="clear-search" onClick={clearSearch}><X size={15} /> Clear</button>
-          ) : null}
-        </form>
-        <div className="topbar-actions">
-          {health && !(health.ocr_configured && health.embedding_configured) && (
-            <div className="health-pill" title={`OCR: ${health.ocr_model}\nEmbeddings: ${health.embedding_model}`}>
-              <span className="health-dot" />
-              Models not ready
-            </div>
-          )}
-          <ThemeControl />
-        </div>
-      </header>
-
-      <main>
-        {error && <div className="error-banner" role="alert">{error}<button onClick={() => { setLibraryError(""); setContextError(""); }} aria-label="Dismiss error"><X size={16} /></button></div>}
-        {uploadState && <div className={`upload-banner${uploadState.failures.length ? " has-errors" : ""}`} role={uploadState.failures.length && !uploadState.active ? "alert" : "status"}><span>{uploadMessage}</span>{!uploadState.active && <button onClick={() => setUploadState(null)} aria-label="Dismiss upload status"><X size={16} /></button>}</div>}
-
-        <section className="library-toolbar">
-          <div className="library-heading">
-            <h2>{searching ? "Search results" : "Library"}</h2>
-            <span className="toolbar-count" aria-live="polite">
-              {searching
-                ? search?.status === "done"
-                  ? <>{search.results.length} {search.results.length === 1 ? "document" : "documents"} {search.mode === "exact" ? "contain" : "for"} “{search.mode === "exact" ? search.text : activeSearch}”</>
-                  : search?.status === "running" ? "Searching" : null
-                : library && <>{library.total} {library.total === 1 ? "document" : "documents"}</>}
-            </span>
-          </div>
-          <div className="toolbar-actions">
-            <button className="upload-button" disabled={uploading} onClick={() => fileInputRef.current?.click()}><Upload size={16} /> {uploading ? "Uploading" : "Upload"}</button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              hidden
-              disabled={uploading}
-              accept="application/pdf,image/png,image/jpeg,image/tiff,image/webp"
-              onChange={(event) => {
-                if (event.target.files) void upload(event.target.files);
-                event.target.value = "";
-              }}
+            <SearchView
+              key={activeSearch}
+              query={activeSearch}
+              state={search}
+              terms={terms}
+              hasFilters={activeFilterCount(query, false) > 0}
+              toolbar={<FilterToggle open={filtersOpen} count={activeFilterCount(query, false)} onToggle={() => setFiltersOpen((open) => !open)} />}
+              filters={<FilterBar query={query} senders={senders} open={filtersOpen || activeFilterCount(query, false) > 0} withSort={false} onChange={updateQuery} />}
+              onOpen={openDocument}
+              onRetry={() => setSearchRun((run) => run + 1)}
+              onClearFilters={() => updateQuery(initialQuery)}
             />
-            <button className={filtersOpen || shownFilters.length ? "active" : ""} aria-expanded={filtersOpen} aria-controls="document-filters" onClick={() => setFiltersOpen((value) => !value)}><SlidersHorizontal size={16} /> Filters{shownFilters.length > 0 && ` (${shownFilters.length})`}</button>
-            {!searching && <div className="segmented" aria-label="Document view">
-              <button aria-label="Grid view" aria-pressed={view === "grid"} className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}><Grid2X2 size={16} /></button>
-              <button aria-label="List view" aria-pressed={view === "list"} className={view === "list" ? "active" : ""} onClick={() => setView("list")}><List size={17} /></button>
-            </div>}
-          </div>
-        </section>
-
-        {filtersOpen && <FilterPanel query={query} senders={senders} searching={searching} onChange={updateQuery} />}
-        {shownFilters.length > 0 && <div className="active-filters" aria-label="Active filters">{shownFilters.map((filter) => <button key={filter.key} onClick={filter.clear} aria-label={`Remove ${filter.label}`}><span>{filter.label}</span><X size={13} aria-hidden="true" /></button>)}<button className="clear-all-filters" onClick={clearAllFilters}>Clear all</button></div>}
-
-        {searching ? (
-          search && <SearchView
-            key={activeSearch}
-            state={search}
-            terms={terms}
-            hasFilters={activeFilters.length > 0}
-            onOpen={openDocument}
-            onRetry={() => setSearchRun((run) => run + 1)}
-            onClearFilters={clearAllFilters}
-          />
-        ) : initialLoading && !library ? (
-          <div className="empty-state"><LoaderCircle className="spin" aria-hidden="true" /><p>Loading your documents</p></div>
-        ) : !library ? (
-          <div className="empty-state">
-            <h3>The library could not be loaded</h3>
-            <p>Check that the Paperless AGX server is running, then try again.</p>
-            <button onClick={() => void refreshLibrary()}>Try again</button>
-          </div>
-        ) : nothingFiled ? (
-          <div className="empty-state">
-            <FileSearch size={36} aria-hidden="true" />
-            <h3>No documents yet</h3>
-            <p>Drop files anywhere on this page, or choose files to begin. PDF, PNG, JPEG, TIFF and WebP are processed on this machine.</p>
-            <button onClick={() => fileInputRef.current?.click()}><Upload size={16} /> Upload documents</button>
-          </div>
-        ) : library.items.length === 0 ? (
-          <div className="empty-state">
-            <FileSearch size={36} aria-hidden="true" />
-            <h3>No documents match these filters</h3>
-            <p>Remove a filter to see more of the library.</p>
-            <div className="empty-actions"><button onClick={clearAllFilters}>Clear filters</button></div>
-          </div>
-        ) : (
-          <div className={`document-collection ${view}`}>
-            {library.items.map((document) => (
-              <DocumentCard
-                key={document.document_id}
-                document={document}
-                terms={[]}
-                onOpen={() => openDocument(document)}
-                onFilterSender={filterBySender}
-              />
-            ))}
-          </div>
-        )}
-
-        {!searching && library && library.total > query.pageSize && (
-          <nav className="pagination" aria-label="Document pages">
-            <button disabled={query.page === 1} onClick={() => setQuery((value) => ({ ...value, page: value.page - 1 }))}>Previous</button>
-            <span>Page {query.page} of {Math.ceil(library.total / query.pageSize)}</span>
-            <button disabled={query.page * query.pageSize >= library.total} onClick={() => setQuery((value) => ({ ...value, page: value.page + 1 }))}>Next</button>
-          </nav>
-        )}
+          ) : (
+            <Library
+              query={query}
+              library={library}
+              loading={initialLoading}
+              senders={senders}
+              view={view}
+              filtersOpen={filtersOpen}
+              onToggleFilters={() => setFiltersOpen((open) => !open)}
+              onView={setView}
+              onQuery={updateQuery}
+              onPage={goToPage}
+              onOpen={(document) => openDocument(document)}
+              onFilterSender={filterBySender}
+              onUpload={chooseFiles}
+              onRetry={() => void refreshLibrary()}
+            />
+          )}
+        </div>
       </main>
 
-      {dropping && <div className="drop-overlay" aria-hidden="true"><p><strong>{uploading ? "Upload in progress" : "Drop to upload"}</strong></p></div>}
+      <UploadTray state={uploadState} onDismiss={dismissUpload} />
 
-      {selected && <DocumentDetail documentId={selected.id} initialPage={selected.page} highlight={selected.highlight} highlightPage={selected.highlightPage} senders={senders} onPageChange={(page) => setSelected((value) => value ? { ...value, page } : value)} onDirtyChange={(dirty) => { detailDirty.current = dirty; }} onClose={closeDocument} onChanged={() => setDataVersion((version) => version + 1)} />}
+      {dropping && <div className="drop" aria-hidden="true">
+        <div className="drop__sheet">
+          <Upload size={28} aria-hidden="true" />
+          <p>{uploading ? "Upload in progress" : "Drop to add to the library"}</p>
+        </div>
+      </div>}
+
+      {selected && <Reader
+        documentId={selected.id}
+        initialPage={selected.page}
+        highlight={selected.highlight}
+        highlightPage={selected.highlightPage}
+        senders={senders}
+        onPageChange={(page) => setSelected((value) => value ? { ...value, page } : value)}
+        onDirtyChange={(dirty) => { detailDirty.current = dirty; }}
+        onClose={closeDocument}
+        onChanged={() => setDataVersion((version) => version + 1)}
+      />}
     </div>
   );
 }

@@ -4,18 +4,20 @@ import { matchesEvidence } from "./evidenceHighlight";
 import { bindPageTextSelection } from "./pageTextSelection";
 
 const LINE_HEIGHT = 1.15;
-const FONT = '"IBM Plex Sans", system-ui, sans-serif';
 const WRAP_SLACK = 1.06;
 const SAMPLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789,.-";
 
 let advance = 0;
+// The first measurement may use a fallback face; measure again once the real one lands.
+window.document.fonts?.ready.then(() => { advance = 0; });
 
 /** Average character advance of the overlay font, as a fraction of the font size. */
 function advanceRatio(): number {
   if (advance > 0) return advance;
   const context = window.document.createElement("canvas").getContext("2d");
   if (!context) return 0.5;
-  context.font = `400 100px ${FONT}`;
+  const family = getComputedStyle(window.document.documentElement).getPropertyValue("--font-body").trim() || "sans-serif";
+  context.font = `400 100px ${family}`;
   advance = context.measureText(SAMPLE).width / SAMPLE.length / 100;
   return advance;
 }

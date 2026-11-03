@@ -3,6 +3,7 @@ import { Monitor, Moon, Sun } from "lucide-react";
 
 type Theme = "system" | "light" | "dark";
 const storageKey = "paperless-agx-theme";
+const NAMES: Record<Theme, string> = { system: "System", light: "Light", dark: "Dark" };
 
 function readTheme(): Theme {
   try {
@@ -13,17 +14,18 @@ function readTheme(): Theme {
   }
 }
 
+/** The colour theme: follows the system unless the reader picks one, and stays in step across tabs. */
 export function ThemeControl() {
   const [theme, setTheme] = useState<Theme>(readTheme);
 
   useEffect(() => {
     const system = window.matchMedia("(prefers-color-scheme: dark)");
     function applyTheme() {
-      const resolved = theme === "system" ? (system.matches ? "dark" : "light") : theme;
-      document.documentElement.dataset.theme = resolved;
-      document.querySelector('meta[name="theme-color"]')?.setAttribute(
-        "content", resolved === "dark" ? "#181818" : "#fafaf9",
-      );
+      const root = document.documentElement;
+      root.dataset.theme = theme === "system" ? (system.matches ? "dark" : "light") : theme;
+      // The browser chrome takes the paper colour of whichever theme is showing.
+      const paper = getComputedStyle(root).getPropertyValue("--color-paper").trim();
+      if (paper) document.querySelector('meta[name="theme-color"]')?.setAttribute("content", paper);
     }
     applyTheme();
     system.addEventListener("change", applyTheme);
@@ -39,26 +41,22 @@ export function ThemeControl() {
   }, []);
 
   const Icon = theme === "system" ? Monitor : theme === "dark" ? Moon : Sun;
-  return (
-    <label className="theme-control">
-      <Icon size={15} aria-hidden="true" />
-      <select
-        aria-label="Color theme"
-        value={theme}
-        onChange={(event) => {
-          const next = event.target.value as Theme;
-          setTheme(next);
-          try {
-            localStorage.setItem(storageKey, next);
-          } catch {
-            // The theme still works for this visit when storage is unavailable.
-          }
-        }}
-      >
-        <option value="system">System</option>
-        <option value="light">Light</option>
-        <option value="dark">Dark</option>
-      </select>
-    </label>
-  );
+  return <label className="theme-control" title={`Color theme: ${NAMES[theme]}`}>
+    <Icon size={18} aria-hidden="true" />
+    <select
+      aria-label="Color theme"
+      value={theme}
+      onChange={(event) => {
+        const next = event.target.value as Theme;
+        setTheme(next);
+        try {
+          localStorage.setItem(storageKey, next);
+        } catch {
+          // The theme still works for this visit when storage is unavailable.
+        }
+      }}
+    >
+      {Object.entries(NAMES).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
+    </select>
+  </label>;
 }

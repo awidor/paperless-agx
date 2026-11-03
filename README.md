@@ -8,6 +8,7 @@ Document OCR and agentic search with page references. Rust, React, SQLite, and a
 - Local llama.cpp OCR server: Surya OCR 2.5 (`surya`, served with `--special`) or Chandra OCR 2 (`chandra`); choose with `[ocr] profile`.
 - OpenRouter API access for metadata and summaries, `google/gemini-embedding-2` search embeddings, and the search agent's model (`anthropic/claude-haiku-5.5` on medium reasoning, set in `config/paperless-agent.toml`).
 - Copy `.env.example` to `.env` and set your API keys.
+- The web build downloads the General Sans font from Fontshare into `web/public/fonts`. Its license allows self-hosting but not redistribution, so the files are not in the repository. Without network access at build time, the interface falls back to the system sans.
 - Set endpoints in `config/paperless-agx.toml`. Model-server example: `config/llama-models.ini`.
 
 ```sh
