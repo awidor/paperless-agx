@@ -300,11 +300,16 @@ async fn embed_document(
 ) -> Result<Vec<paperless_models::Chunk>> {
     let mut chunks = chunk_document(document, pages)?;
     let vectors = embeddings
-        .embed_documents(chunks.iter().map(|chunk| chunk.text.clone()).collect())
+        .embed_documents(
+            chunks
+                .iter()
+                .map(|chunk| (document.title.clone(), chunk.text.clone()))
+                .collect(),
+        )
         .await?;
     if vectors.len() != chunks.len() {
         bail!(
-            "Harrier returned {} embeddings for {} chunks",
+            "embedding service returned {} embeddings for {} chunks",
             vectors.len(),
             chunks.len()
         );

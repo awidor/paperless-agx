@@ -83,10 +83,10 @@ render_concurrency = 2
 eager_thumbnail_pages = 3
 
 [embeddings]
-base_url = "http://127.0.0.1:8765/v1"
-model = "harrier"
-api_key_env = "OCR_API_KEY"
-max_concurrency = 1
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+model = "gemini-embedding-2"
+api_key_env = "GEMINI_API_KEY"
+max_concurrency = 2
 [ocr]
 base_url = "http://127.0.0.1:8765/v1"
 model = "chandra"
@@ -107,14 +107,17 @@ max_concurrency = 1
         let config = AppConfig::load(path).await.unwrap();
         assert_eq!(
             config.embeddings.as_ref().unwrap().base_url.as_str(),
-            "http://127.0.0.1:8765/v1"
+            "https://generativelanguage.googleapis.com/v1beta"
         );
-        assert_eq!(config.embeddings.as_ref().unwrap().model, "harrier");
+        assert_eq!(
+            config.embeddings.as_ref().unwrap().model,
+            "gemini-embedding-2"
+        );
         assert_eq!(
             config.embeddings.as_ref().unwrap().api_key_env,
-            "OCR_API_KEY"
+            "GEMINI_API_KEY"
         );
-        assert_eq!(config.embeddings.as_ref().unwrap().max_concurrency, 1);
+        assert_eq!(config.embeddings.as_ref().unwrap().max_concurrency, 2);
         assert_eq!(config.ocr.pages_per_request, 2);
         assert_eq!(config.ocr.model, "chandra");
         assert_eq!(config.ocr.max_output_tokens, 24_576);

@@ -5,7 +5,8 @@ Document OCR, search, and answers with page references. Rust, React, and SQLite.
 ## Setup
 
 - Rust 1.96+, Bun 1.3+, Node.js 24, and Poppler (`poppler-utils`).
-- Local Chandra OCR and Harrier embedding services; model aliases `chandra` and `harrier`.
+- Local Chandra OCR service; model alias `chandra`.
+- Gemini API access for `gemini-embedding-2` search embeddings.
 - OpenRouter API access for metadata and answers.
 - Copy `.env.example` to `.env` and set your API keys.
 - Set endpoints in `config/paperless-agx.toml`. Model-server example: `config/llama-models.ini`.
@@ -20,7 +21,8 @@ cargo run --locked -p paperless-server
 
 - Open http://127.0.0.1:3000.
 - Local use: no built-in authentication.
-- Documents stay in `data/`; extracted text and questions are sent to OpenRouter.
+- Documents stay in `data/`; extracted text and questions are sent to OpenRouter, and text passages and search queries to the Gemini API.
+- Changing the embedding model re-embeds stored passages at the next start.
 - Docker: use `compose.yaml`; make `data/` writable by UID 10001 and configure `config/paperless-agx.docker.toml`.
 
 ## Tests

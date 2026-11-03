@@ -59,9 +59,46 @@ fn configure(connection: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+/// Bump when the schema changes in a way `CREATE ... IF NOT EXISTS` cannot express.
+const SCHEMA_VERSION: i64 = 1;
+
+const CHUNK_COLUMNS_SQL: &str = "(\n\
+    chunk_id INTEGER PRIMARY KEY,\n\
+    document_id INTEGER NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,\n\
+    page_start INTEGER NOT NULL,\n\
+    page_end INTEGER NOT NULL,\n\
+    char_start INTEGER NOT NULL,\n\
+    char_end INTEGER NOT NULL,\n\
+    text TEXT NOT NULL,\n\
+    embedding BLOB,\n\
+    created_at INTEGER,\n\
+    sender TEXT\n\
+)";
+
 fn initialize(connection: &mut Connection) -> Result<()> {
-    connection
-        .execute_batch(
+    let transaction = connection
+        .transaction()
+        .context("start SQLite schema transaction")?;
+    let version: i64 = transaction
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("read SQLite schema version")?;
+    if version < 1 && table_exists(&transaction, "chunks")? {
+        // Before version 1 every chunk carried a fixed 1,024-value Harrier vector. Keep the
+        // chunk text and drop those vectors so the configured embedding model re-embeds them.
+        transaction
+            .execute_batch(&format!(
+                "CREATE TABLE chunks_v1 {CHUNK_COLUMNS_SQL};\n\
+                 INSERT INTO chunks_v1 (chunk_id, document_id, page_start, page_end, char_start,\n\
+                     char_end, text, embedding, created_at, sender)\n\
+                 SELECT chunk_id, document_id, page_start, page_end, char_start, char_end, text,\n\
+                     NULL, created_at, sender FROM chunks;\n\
+                 DROP TABLE chunks;\n\
+                 ALTER TABLE chunks_v1 RENAME TO chunks;"
+            ))
+            .context("migrate chunks to nullable embeddings")?;
+    }
+    transaction
+        .execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS documents (\n\
                  document_id INTEGER PRIMARY KEY,\n\
                  content_hash BLOB NOT NULL CHECK(length(content_hash) = 32),\n\
@@ -94,18 +131,7 @@ fn initialize(connection: &mut Connection) -> Result<()> {
                  updated_at INTEGER NOT NULL,\n\
                  PRIMARY KEY(document_id, page)\n\
              );\n\
-             CREATE TABLE IF NOT EXISTS chunks (\n\
-                 chunk_id INTEGER PRIMARY KEY,\n\
-                 document_id INTEGER NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,\n\
-                 page_start INTEGER NOT NULL,\n\
-                 page_end INTEGER NOT NULL,\n\
-                 char_start INTEGER NOT NULL,\n\
-                 char_end INTEGER NOT NULL,\n\
-                 text TEXT NOT NULL,\n\
-                 embedding BLOB NOT NULL CHECK(length(embedding) = 4096),\n\
-                 created_at INTEGER,\n\
-                 sender TEXT\n\
-             );\n\
+             CREATE TABLE IF NOT EXISTS chunks {CHUNK_COLUMNS_SQL};\n\
              CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id, chunk_id);\n\
              CREATE INDEX IF NOT EXISTS chunks_sender_date ON chunks(sender, created_at);\n\
              CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(\n\
@@ -120,8 +146,32 @@ fn initialize(connection: &mut Connection) -> Result<()> {
              CREATE TRIGGER IF NOT EXISTS chunks_update AFTER UPDATE OF text ON chunks BEGIN\n\
                  INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.chunk_id, old.text);\n\
                  INSERT INTO chunks_fts(rowid, text) VALUES (new.chunk_id, new.text);\n\
-             END;",
-        )
+             END;\n\
+             CREATE TABLE IF NOT EXISTS settings (\n\
+                 key TEXT PRIMARY KEY,\n\
+                 value TEXT NOT NULL\n\
+             );"
+        ))
         .context("create SQLite schema")?;
-    Ok(())
+    if version < SCHEMA_VERSION {
+        transaction
+            .execute_batch(&format!(
+                "INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild');\n\
+                 PRAGMA user_version = {SCHEMA_VERSION};"
+            ))
+            .context("record SQLite schema version")?;
+    }
+    transaction
+        .commit()
+        .context("commit SQLite schema transaction")
+}
+
+fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+            [name],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("check for SQLite table {name}"))
 }

@@ -100,8 +100,8 @@ fn is_manual_value<T>(source: Option<MetadataSource>, value: &Option<T>) -> bool
 mod tests {
     use chrono::{TimeZone, Utc};
     use paperless_models::{
-        Chunk, Document, DocumentPatch, InferredMetadata, IngestionStatus, MediaType,
-        MetadataSource,
+        Chunk, Document, DocumentPatch, EMBEDDING_DIMENSION, InferredMetadata, IngestionStatus,
+        MediaType, MetadataSource,
     };
     use paperless_storage::{ChunkRepository, DataLayout, DocumentRepository};
 
@@ -146,7 +146,7 @@ mod tests {
                     char_start: 0,
                     char_end: 4,
                     text: "text".into(),
-                    embedding: vec![0.0; 1024],
+                    embedding: vec![0.0; EMBEDDING_DIMENSION],
                     created_at: None,
                     sender: None,
                 }],

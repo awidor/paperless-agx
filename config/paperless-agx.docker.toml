@@ -5,10 +5,10 @@ render_concurrency = 2
 eager_thumbnail_pages = 3
 
 [embeddings]
-base_url = "http://host.docker.internal:8765/v1"
-model = "harrier"
-api_key_env = "OCR_API_KEY"
-max_concurrency = 1
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+model = "gemini-embedding-2"
+api_key_env = "GEMINI_API_KEY"
+max_concurrency = 2
 
 [ocr]
 base_url = "http://host.docker.internal:8765/v1"

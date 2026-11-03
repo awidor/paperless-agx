@@ -3,6 +3,9 @@ use std::{fmt, str::FromStr};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Length of every stored chunk embedding (Gemini Embedding 2 at full size).
+pub const EMBEDDING_DIMENSION: usize = 3072;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaType {
@@ -346,7 +349,7 @@ pub struct HealthResponse {
     pub ocr_model: String,
     pub metadata_model: String,
     pub embedding_configured: bool,
-    pub embedding_model: &'static str,
+    pub embedding_model: String,
 }
 
 #[cfg(test)]

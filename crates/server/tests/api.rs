@@ -99,24 +99,14 @@ async fn start_ocr_with_text(text: String) -> Url {
             }),
         )
         .route(
-            "/v1/embeddings",
+            "/v1/models/gemini-embedding-2:batchEmbedContents",
             post(|Json(body): Json<serde_json::Value>| async move {
-                let count = body["input"].as_array().map_or(1, Vec::len);
-                let values = vec![1.0_f32; 1024];
-                let embedding = (0..count)
-                    .map(|index| {
-                        serde_json::json!({
-                            "object": "embedding",
-                            "embedding": values.clone(),
-                            "index": index
-                        })
-                    })
+                let count = body["requests"].as_array().map_or(0, Vec::len);
+                let values = vec![1.0_f32; paperless_models::EMBEDDING_DIMENSION];
+                let embeddings = (0..count)
+                    .map(|_| serde_json::json!({ "values": values.clone() }))
                     .collect::<Vec<_>>();
-                Json(serde_json::json!({
-                    "object": "list",
-                    "data": embedding,
-                    "model": body["model"]
-                }))
+                Json(serde_json::json!({ "embeddings": embeddings }))
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -266,7 +256,7 @@ async fn upload_with_embeddings_reaches_ready_and_is_searchable() {
     let mut settings = config(temporary.path(), base_url.clone());
     settings.embeddings = Some(EmbeddingConfig {
         base_url,
-        model: "harrier".into(),
+        model: "gemini-embedding-2".into(),
         api_key_env: "PATH".into(),
         max_concurrency: 1,
     });

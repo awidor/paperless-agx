@@ -4,18 +4,23 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
-pub const HARRIER_MODEL_ID: &str = "microsoft/harrier-oss-v1-0.6b";
-pub const HARRIER_MODEL_ALIAS: &str = "harrier";
-pub const EMBEDDING_DIMENSION: usize = 1024;
-pub const QUERY_TASK: &str =
-    "Given a web search query, retrieve relevant passages that answer the query";
+pub use paperless_models::EMBEDDING_DIMENSION;
 
+/// Gemini accepts at most 100 requests in one `batchEmbedContents` call.
+const MAX_BATCH_INPUTS: usize = 100;
+
+/// Asymmetric retrieval prompt for search queries, as documented for `gemini-embedding-2`.
 pub fn query_input(query: &str) -> String {
-    format!("Instruct: {QUERY_TASK}\nQuery: {query}")
+    format!("task: search result | query: {query}")
 }
 
-pub fn document_input(document: &str) -> &str {
-    document
+/// Asymmetric retrieval prompt for indexed passages, as documented for `gemini-embedding-2`.
+pub fn document_input(title: Option<&str>, text: &str) -> String {
+    let title = title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("none");
+    format!("title: {title} | text: {text}")
 }
 
 #[derive(Clone)]
@@ -23,6 +28,7 @@ pub struct EmbeddingService {
     client: reqwest::Client,
     endpoint: Arc<str>,
     model: Arc<str>,
+    model_resource: Arc<str>,
     api_key: Arc<str>,
     gate: Arc<Semaphore>,
 }
@@ -36,7 +42,9 @@ impl EmbeddingService {
     ) -> Result<Self> {
         let api_key_env = api_key_env.as_ref();
         let api_key = std::env::var(api_key_env)
-            .with_context(|| format!("read embedding API key from {api_key_env}"))?;
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .with_context(|| format!("embedding API key {api_key_env} is not set"))?;
         Self::new(base_url, model, api_key, max_concurrency)
     }
 
@@ -53,33 +61,60 @@ impl EmbeddingService {
         if base_url.is_empty() {
             bail!("embedding base_url must not be empty");
         }
+        let model = model.into();
+        let model = model.trim().trim_start_matches("models/").to_owned();
+        if model.is_empty() {
+            bail!("embedding model must not be empty");
+        }
         Ok(Self {
             client: reqwest::Client::new(),
-            endpoint: Arc::from(format!("{base_url}/embeddings")),
-            model: Arc::from(model.into()),
+            endpoint: Arc::from(format!("{base_url}/models/{model}:batchEmbedContents")),
+            model_resource: Arc::from(format!("models/{model}")),
+            model: Arc::from(model),
             api_key: Arc::from(api_key.into()),
             gate: Arc::new(Semaphore::new(max_concurrency)),
         })
     }
 
-    pub async fn embed_documents(&self, documents: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        self.embed_batch(
-            documents
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Identifies the vector space stored chunks belong to; a change requires re-embedding.
+    pub fn vector_space(&self) -> String {
+        format!("{}:{EMBEDDING_DIMENSION}", self.model)
+    }
+
+    /// Embeds passages, each paired with the title of the document it belongs to.
+    pub async fn embed_documents(
+        &self,
+        passages: Vec<(Option<String>, String)>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.embed_inputs(
+            passages
                 .iter()
-                .map(|document| document_input(document).to_owned())
+                .map(|(title, text)| document_input(title.as_deref(), text))
                 .collect(),
         )
         .await
     }
 
     pub async fn embed_query(&self, query: String) -> Result<Vec<f32>> {
-        self.embed_batch(vec![query_input(&query)])
+        self.embed_inputs(vec![query_input(&query)])
             .await?
             .pop()
-            .context("Harrier returned no query embedding")
+            .context("embedding service returned no query embedding")
     }
 
-    async fn embed_batch(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+    async fn embed_inputs(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        let mut vectors = Vec::with_capacity(inputs.len());
+        for batch in inputs.chunks(MAX_BATCH_INPUTS) {
+            vectors.extend(self.embed_batch(batch).await?);
+        }
+        Ok(vectors)
+    }
+
+    async fn embed_batch(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
@@ -89,70 +124,91 @@ impl EmbeddingService {
             .acquire_owned()
             .await
             .context("embedding gate closed")?;
-        let request = EmbeddingRequest {
-            model: self.model.as_ref(),
-            input: &inputs,
+        let request = BatchEmbedRequest {
+            requests: inputs
+                .iter()
+                .map(|text| EmbedRequest {
+                    model: &self.model_resource,
+                    content: Content {
+                        parts: vec![Part { text }],
+                    },
+                    output_dimensionality: EMBEDDING_DIMENSION,
+                })
+                .collect(),
         };
         let response = self
             .client
             .post(self.endpoint.as_ref())
-            .bearer_auth(self.api_key.as_ref())
+            .header("x-goog-api-key", self.api_key.as_ref())
             .json(&request)
             .send()
             .await
-            .context("send Harrier embedding request")?;
+            .context("send embedding request")?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .context("read Harrier embedding response")?;
+        let body = response.text().await.context("read embedding response")?;
         if !status.is_success() {
-            bail!("Harrier embedding request failed with {status}: {body}");
+            bail!("embedding request failed with {status}: {body}");
         }
-        let mut result: EmbeddingResponse =
-            serde_json::from_str(&body).with_context(|| "parse Harrier embedding response")?;
-        result.data.sort_by_key(|item| item.index);
-        if result.data.len() != inputs.len() {
+        let result: BatchEmbedResponse =
+            serde_json::from_str(&body).context("parse embedding response")?;
+        if result.embeddings.len() != inputs.len() {
             bail!(
-                "Harrier returned {} embeddings for {} inputs",
-                result.data.len(),
+                "embedding service returned {} embeddings for {} inputs",
+                result.embeddings.len(),
                 inputs.len()
             );
         }
         result
-            .data
+            .embeddings
             .into_iter()
-            .map(|item| normalize_embedding(item.embedding))
+            .map(|item| normalize_embedding(item.values))
             .collect()
     }
 }
 
 #[derive(Debug, Serialize)]
-struct EmbeddingRequest<'a> {
+struct BatchEmbedRequest<'a> {
+    requests: Vec<EmbedRequest<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbedRequest<'a> {
     model: &'a str,
-    input: &'a [String],
+    content: Content<'a>,
+    output_dimensionality: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct Content<'a> {
+    parts: Vec<Part<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct Part<'a> {
+    text: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
-struct EmbeddingResponse {
-    data: Vec<EmbeddingItem>,
+struct BatchEmbedResponse {
+    #[serde(default)]
+    embeddings: Vec<ContentEmbedding>,
 }
 
 #[derive(Debug, Deserialize)]
-struct EmbeddingItem {
-    embedding: Vec<f32>,
-    index: usize,
+struct ContentEmbedding {
+    values: Vec<f32>,
 }
 
 fn normalize_embedding(embedding: Vec<f32>) -> Result<Vec<f32>> {
     if embedding.len() != EMBEDDING_DIMENSION {
         bail!(
-            "Harrier returned {} dimensions, expected {EMBEDDING_DIMENSION}",
+            "embedding service returned {} dimensions, expected {EMBEDDING_DIMENSION}",
             embedding.len()
         );
     }
     if embedding.iter().any(|value| !value.is_finite()) {
-        bail!("Harrier returned a non-finite embedding value");
+        bail!("embedding service returned a non-finite embedding value");
     }
     let norm = embedding
         .iter()
@@ -160,7 +216,7 @@ fn normalize_embedding(embedding: Vec<f32>) -> Result<Vec<f32>> {
         .sum::<f32>()
         .sqrt();
     if !norm.is_finite() || norm == 0.0 {
-        bail!("Harrier returned an embedding with no usable norm");
+        bail!("embedding service returned an embedding with no usable norm");
     }
     Ok(embedding.into_iter().map(|value| value / norm).collect())
 }
@@ -170,12 +226,19 @@ mod tests {
     use super::{EMBEDDING_DIMENSION, document_input, normalize_embedding, query_input};
 
     #[test]
-    fn query_has_required_instruction_and_document_has_none() {
+    fn formats_gemini_retrieval_prompts() {
         assert_eq!(
             query_input("summit define"),
-            "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: summit define"
+            "task: search result | query: summit define"
         );
-        assert_eq!(document_input("summit definition"), "summit definition");
+        assert_eq!(
+            document_input(Some("Beitragsbescheid"), "Ihr Beitrag"),
+            "title: Beitragsbescheid | text: Ihr Beitrag"
+        );
+        assert_eq!(
+            document_input(Some("  "), "Ihr Beitrag"),
+            "title: none | text: Ihr Beitrag"
+        );
     }
 
     #[test]
@@ -186,11 +249,7 @@ mod tests {
         let normalized = normalize_embedding(values).unwrap();
         assert_eq!(normalized[0], 0.6);
         assert_eq!(normalized[1], 0.8);
-    }
-
-    #[test]
-    fn rejects_invalid_embedding_shape() {
         let error = normalize_embedding(vec![1.0]).unwrap_err();
-        assert!(error.to_string().contains("1024"));
+        assert!(error.to_string().contains("3072"));
     }
 }

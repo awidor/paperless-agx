@@ -6,6 +6,7 @@ services:
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OCR_API_KEY: ${OCR_API_KEY:-EMPTY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

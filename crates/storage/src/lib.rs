@@ -5,7 +5,9 @@ mod layout;
 mod objects;
 mod pages;
 
-pub use chunks::{ChunkMatch, ChunkRepository, EMBEDDING_DIMENSION, SearchFilter};
+pub use chunks::{
+    ChunkMatch, ChunkRepository, EMBEDDING_DIMENSION, PendingEmbedding, SearchFilter,
+};
 pub use documents::DocumentRepository;
 pub use layout::{DataLayout, hash_hex};
 pub use objects::{ObjectStore, StoredObject};

@@ -5,8 +5,9 @@ use rusqlite::{OptionalExtension, params, types::Value};
 
 use crate::{DataLayout, database::Database};
 
-pub const EMBEDDING_DIMENSION: usize = 1024;
+pub use paperless_models::EMBEDDING_DIMENSION;
 const EMBEDDING_BYTES: usize = EMBEDDING_DIMENSION * std::mem::size_of::<f32>();
+const VECTOR_SPACE_SETTING: &str = "embedding_vector_space";
 
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilter {
@@ -20,6 +21,14 @@ pub struct ChunkMatch {
     pub chunk: Chunk,
     pub rank: usize,
     pub score: f32,
+}
+
+/// A stored chunk whose embedding has not been computed for the current model yet.
+#[derive(Debug, Clone)]
+pub struct PendingEmbedding {
+    pub chunk_id: u64,
+    pub title: Option<String>,
+    pub text: String,
 }
 
 #[derive(Clone)]
@@ -138,6 +147,118 @@ impl ChunkRepository {
             .await
     }
 
+    /// Clears every stored vector when the configured embedding model or size changed, so
+    /// the chunks are re-embedded in the new vector space. Returns the number cleared.
+    pub async fn reset_vector_space(&self, vector_space: &str) -> Result<usize> {
+        let vector_space = vector_space.to_owned();
+        self.database
+            .run(move |connection| {
+                let transaction = connection
+                    .transaction()
+                    .context("start vector space transaction")?;
+                let stored: Option<String> = transaction
+                    .query_row(
+                        "SELECT value FROM settings WHERE key = ?",
+                        [VECTOR_SPACE_SETTING],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .context("read stored vector space")?;
+                if stored.as_deref() == Some(vector_space.as_str()) {
+                    return Ok(0);
+                }
+                let cleared = transaction
+                    .execute(
+                        "UPDATE chunks SET embedding = NULL WHERE embedding IS NOT NULL",
+                        [],
+                    )
+                    .context("clear embeddings from a previous model")?;
+                transaction
+                    .execute(
+                        "INSERT INTO settings (key, value) VALUES (?, ?)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        params![VECTOR_SPACE_SETTING, vector_space],
+                    )
+                    .context("store vector space")?;
+                transaction
+                    .commit()
+                    .context("commit vector space transaction")?;
+                Ok(cleared)
+            })
+            .await
+    }
+
+    /// Lists chunks without an embedding, in chunk order, starting after `after_chunk_id`.
+    pub async fn pending_embeddings(
+        &self,
+        after_chunk_id: u64,
+        limit: usize,
+    ) -> Result<Vec<PendingEmbedding>> {
+        let after_chunk_id = i64_value(after_chunk_id, "chunk id")?;
+        let limit = i64::try_from(limit).context("pending embedding limit is too large")?;
+        self.database
+            .run(move |connection| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT chunks.chunk_id, d.title, chunks.text FROM chunks
+                         JOIN documents d ON d.document_id = chunks.document_id
+                         WHERE chunks.embedding IS NULL AND d.deleted_at IS NULL
+                             AND chunks.chunk_id > ?
+                         ORDER BY chunks.chunk_id
+                         LIMIT ?",
+                    )
+                    .context("query pending embeddings")?;
+                let rows = statement
+                    .query_map(params![after_chunk_id, limit], |row| {
+                        Ok(PendingEmbedding {
+                            chunk_id: from_i64(row.get(0)?, "chunk_id")?,
+                            title: row.get(1)?,
+                            text: row.get(2)?,
+                        })
+                    })
+                    .context("read pending embeddings")?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .context("decode pending embeddings")
+            })
+            .await
+    }
+
+    /// Stores embeddings for pending chunks. A chunk whose text changed since it was listed
+    /// is skipped, because its vector would describe the old text.
+    pub async fn store_embeddings(
+        &self,
+        embedded: Vec<(PendingEmbedding, Vec<f32>)>,
+    ) -> Result<()> {
+        let mut rows = Vec::with_capacity(embedded.len());
+        for (pending, embedding) in embedded {
+            rows.push((
+                i64_value(pending.chunk_id, "chunk id")?,
+                pending.text,
+                embedding_bytes(&embedding)?,
+            ));
+        }
+        self.database
+            .run(move |connection| {
+                let transaction = connection
+                    .transaction()
+                    .context("start embedding transaction")?;
+                for (chunk_id, text, embedding) in rows {
+                    transaction
+                        .execute(
+                            "UPDATE chunks SET embedding = ?
+                             WHERE chunk_id = ? AND text = ? AND embedding IS NULL",
+                            params![embedding, chunk_id, text],
+                        )
+                        .context("store chunk embedding")?;
+                }
+                transaction
+                    .commit()
+                    .context("commit embedding transaction")?;
+                Ok(())
+            })
+            .await
+    }
+
     pub async fn vector_candidates(
         &self,
         embedding: &[f32],
@@ -155,7 +276,7 @@ impl ChunkRepository {
                 let sql = format!(
                     "{CHUNK_SELECT_SQL}
                      JOIN documents d ON d.document_id = chunks.document_id
-                     WHERE d.deleted_at IS NULL{where_sql}"
+                     WHERE d.deleted_at IS NULL AND chunks.embedding IS NOT NULL{where_sql}"
                 );
                 let mut statement = connection
                     .prepare(&sql)
@@ -307,7 +428,11 @@ fn embedding_bytes(embedding: &[f32]) -> Result<Vec<u8>> {
         .collect())
 }
 
-fn embedding_from_bytes(bytes: Vec<u8>) -> rusqlite::Result<Vec<f32>> {
+/// Chunks that are not embedded yet (`NULL`) load with an empty embedding.
+fn embedding_from_bytes(bytes: Option<Vec<u8>>) -> rusqlite::Result<Vec<f32>> {
+    let Some(bytes) = bytes else {
+        return Ok(Vec::new());
+    };
     if bytes.len() != EMBEDDING_BYTES {
         return Err(rusqlite::Error::FromSqlConversionFailure(
             7,
@@ -477,5 +602,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(vector[0].chunk.chunk_id, 1);
+    }
+
+    #[tokio::test]
+    async fn migrates_fixed_size_harrier_chunks_and_re_embeds_them() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layout = DataLayout::create(temporary.path()).await.unwrap();
+        let legacy = rusqlite::Connection::open(&layout.database).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE documents (
+                     document_id INTEGER PRIMARY KEY,
+                     content_hash BLOB NOT NULL CHECK(length(content_hash) = 32),
+                     media_type TEXT NOT NULL, filename TEXT NOT NULL, title TEXT, sender TEXT,
+                     created_at INTEGER, added_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                     title_source TEXT, sender_source TEXT, created_at_source TEXT,
+                     page_count INTEGER NOT NULL, file_size INTEGER NOT NULL,
+                     status TEXT NOT NULL, last_error TEXT, retry_count INTEGER NOT NULL,
+                     deleted_at INTEGER
+                 );
+                 INSERT INTO documents VALUES (1, zeroblob(32), 'pdf', 'brief.pdf', 'Beitragsbescheid',
+                     NULL, NULL, 0, 0, NULL, NULL, NULL, 1, 1, 'READY', NULL, 0, NULL);
+                 CREATE TABLE chunks (
+                     chunk_id INTEGER PRIMARY KEY,
+                     document_id INTEGER NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+                     page_start INTEGER NOT NULL, page_end INTEGER NOT NULL,
+                     char_start INTEGER NOT NULL, char_end INTEGER NOT NULL, text TEXT NOT NULL,
+                     embedding BLOB NOT NULL CHECK(length(embedding) = 4096),
+                     created_at INTEGER, sender TEXT
+                 );
+                 CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                     text, content='chunks', content_rowid='chunk_id', tokenize='unicode61'
+                 );
+                 CREATE TRIGGER chunks_insert AFTER INSERT ON chunks BEGIN
+                     INSERT INTO chunks_fts(rowid, text) VALUES (new.chunk_id, new.text);
+                 END;
+                 INSERT INTO chunks VALUES (7, 1, 1, 1, 0, 21, 'Beitrag zur Krankenkasse',
+                     zeroblob(4096), NULL, NULL);",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let repository = ChunkRepository::open(&layout).await.unwrap();
+        let pending = repository.pending_embeddings(0, 10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].chunk_id, 7);
+        assert_eq!(pending[0].title.as_deref(), Some("Beitragsbescheid"));
+        let lexical = repository
+            .lexical_candidates("Krankenkasse", SearchFilter::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(lexical[0].chunk.chunk_id, 7);
+        assert!(
+            repository
+                .vector_candidates(&vec![1.0; EMBEDDING_DIMENSION], SearchFilter::default(), 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            repository
+                .reset_vector_space("gemini-embedding-2:3072")
+                .await
+                .unwrap(),
+            0
+        );
+        let mut embedding = vec![0.0; EMBEDDING_DIMENSION];
+        embedding[0] = 1.0;
+        repository
+            .store_embeddings(vec![(pending[0].clone(), embedding)])
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .pending_embeddings(0, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let vector = repository
+            .vector_candidates(&vec![1.0; EMBEDDING_DIMENSION], SearchFilter::default(), 1)
+            .await
+            .unwrap();
+        assert_eq!(vector[0].chunk.chunk_id, 7);
+
+        // A later model change clears the stored vectors again.
+        assert_eq!(
+            repository
+                .reset_vector_space("another-model:3072")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(repository.pending_embeddings(0, 10).await.unwrap().len(), 1);
     }
 }

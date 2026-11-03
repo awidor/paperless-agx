@@ -10,7 +10,9 @@ use axum::{
     routing::{get, post},
 };
 use paperless_embeddings::EmbeddingService;
-use paperless_ingest::{CleanupQueue, IngestionQueue, MetadataService, PreviewService};
+use paperless_ingest::{
+    CleanupQueue, IngestionQueue, MetadataService, PreviewService, embed_pending_chunks,
+};
 use paperless_models::IngestionStatus;
 use paperless_ocr_client::OcrClient;
 use paperless_storage::{
@@ -22,6 +24,7 @@ use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
+use tracing::{error, info, warn};
 
 pub use config::{AppConfig, EmbeddingConfig};
 pub use routes::AppError;
@@ -38,6 +41,7 @@ pub struct AppState {
     pub cleanup: CleanupQueue,
     pub metadata: MetadataService,
     pub embeddings: Option<EmbeddingService>,
+    pub embedding_model: String,
     pub ocr: OcrClient,
     pub upload_commit: Arc<Mutex<()>>,
 }
@@ -73,15 +77,40 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         config.eager_thumbnail_pages,
         config.ocr.pages_per_request,
     )?;
+    let embedding_model = config
+        .embeddings
+        .as_ref()
+        .map(|embedding| embedding.model.clone())
+        .unwrap_or_default();
     let embeddings = match &config.embeddings {
-        Some(embedding) => Some(EmbeddingService::from_environment(
+        Some(embedding) => match EmbeddingService::from_environment(
             embedding.base_url.as_str(),
             embedding.model.clone(),
             &embedding.api_key_env,
             embedding.max_concurrency,
-        )?),
+        ) {
+            Ok(service) => Some(service),
+            Err(error) => {
+                warn!(error = %format!("{error:#}"), "embeddings disabled; search and new uploads need them");
+                None
+            }
+        },
         None => None,
     };
+    if let Some(service) = &embeddings {
+        let cleared = chunks.reset_vector_space(&service.vector_space()).await?;
+        if cleared > 0 {
+            info!(cleared, vector_space = %service.vector_space(), "embedding model changed; re-embedding stored chunks");
+        }
+        let (chunks, service) = (chunks.clone(), service.clone());
+        tokio::spawn(async move {
+            match embed_pending_chunks(&chunks, &service).await {
+                Ok(0) => {}
+                Ok(count) => info!(count, "embedded stored chunks"),
+                Err(error) => error!(error = %format!("{error:#}"), "embed stored chunks"),
+            }
+        });
+    }
     let ocr = OcrClient::from_environment(config.ocr, config.llm)?;
     let ingestion = IngestionQueue::start(
         documents.clone(),
@@ -116,6 +145,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         cleanup,
         metadata,
         embeddings,
+        embedding_model,
         ocr,
         upload_commit: Arc::new(Mutex::new(())),
     };

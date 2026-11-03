@@ -34,7 +34,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         ocr_model: state.ocr.config().model.clone(),
         metadata_model: state.ocr.metadata_model().to_owned(),
         embedding_configured: state.embeddings.is_some(),
-        embedding_model: paperless_embeddings::HARRIER_MODEL_ID,
+        embedding_model: state.embedding_model.clone(),
     })
 }
 
