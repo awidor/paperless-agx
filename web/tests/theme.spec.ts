@@ -148,7 +148,7 @@ test("PDF pages are dark while text selection and original file downloads remain
 test("search evidence and thumbnails also use dark document colors", async ({ page }, testInfo) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto(`${url}/?q=statement`);
-  await expect(page.locator(".result__head img").first()).toHaveCSS("filter", darkFilter);
+  await expect(page.locator(".result .sheet--mini img").first()).toHaveCSS("filter", darkFilter);
   await expect(page.locator(".evidence__desk .image-page-frame > img")).toHaveCSS("filter", darkFilter);
   await page.evaluate(() => document.fonts.ready);
   await page.screenshot({ path: testInfo.outputPath("dark-search.png"), fullPage: false });

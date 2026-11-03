@@ -13,7 +13,7 @@ import {
 import { DigitalPage } from "./DigitalPage";
 import { documentName, formatBytes, formatDay, isProcessing, stage } from "./format";
 import { PageView } from "./PageView";
-import { Alert, EmptyState, Spinner, StageMeter } from "./ui";
+import { Alert, EmptyState, Spinner, StageMeter, useRevealMark } from "./ui";
 
 function MetadataField({ label, ai, children }: { label: string; ai: boolean; children: ReactNode }) {
   return <label className="field">
@@ -219,6 +219,7 @@ export function Reader({ documentId, initialPage, highlight, highlightPage, send
   const dirty = document !== null
     && (title !== (document.title || "") || sender !== (document.sender || "") || createdAt !== savedDate);
   const pageCount = document?.page_count || 1;
+  useRevealMark(stageRef, pageHighlight && document ? `${page}-${tab}` : null);
 
   useEffect(() => {
     onDirtyChange(dirty);

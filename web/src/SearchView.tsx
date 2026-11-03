@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BookOpen, ChevronDown, FileText, List, Search } from "lucide-react";
+import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, FileText, List, Search } from "lucide-react";
 import { getDocument, getPages, type AgentProgress, type Document, type PageInfo, type SearchPassage } from "./api";
 import { documentDate, documentName, formatDay, plural } from "./format";
 import { Marked } from "./Marked";
 import { PageView } from "./PageView";
 import type { SearchAnswer, SearchResult, SearchState } from "./search";
-import { EmptyState, Spinner, Thumbnail } from "./ui";
+import { EmptyState, Spinner, Thumbnail, useRevealMark } from "./ui";
 
 type Selection = { documentId: number; chunkId: number | null };
-type EvidenceTarget = { result: SearchResult; passage: SearchPassage };
 
 const EXCERPT_CHARS = 220;
 
@@ -147,6 +146,24 @@ export function SearchView({ query, state, terms, hasFilters, toolbar, filters, 
   </section>;
 }
 
+/** Matches narrow screens, where the reader takes the place of the side preview. */
+function useNarrow(): boolean {
+  const query = "(max-width: 60rem)";
+  const [narrow, setNarrow] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const update = () => setNarrow(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return narrow;
+}
+
+/**
+ * The search results: the answer once, each document once with the one line
+ * that says why it matched, and the evidence as the page itself with the
+ * passage marked on it.
+ */
 function Results({ results, answer, exact, terms, onOpen }: {
   results: SearchResult[];
   answer: SearchAnswer | null;
@@ -156,23 +173,31 @@ function Results({ results, answer, exact, terms, onOpen }: {
   onOpen: (document: Document, page: number, highlight?: string) => void;
 }) {
   const [selection, setSelection] = useState<Selection>(() => firstSelection(results[0]));
+  const [browsedPage, setBrowsedPage] = useState<number | null>(null);
   const [document, setDocument] = useState<Document | null>(null);
   const [pages, setPages] = useState<PageInfo[]>([]);
   const [previewLoading, setPreviewLoading] = useState(true);
   const [previewError, setPreviewError] = useState("");
-  const previewRef = useRef<HTMLElement>(null);
+  const narrow = useNarrow();
+  const deskRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => setSelection(firstSelection(results[0])), [results]);
+  useEffect(() => setBrowsedPage(null), [selection.documentId, selection.chunkId]);
 
   const selectedResult = results.find((result) => result.document.document_id === selection.documentId) ?? results[0];
   const selectedPassage = selectedResult?.passages.find((passage) => passage.chunk_id === selection.chunkId) ?? selectedResult?.passages[0];
-  const page = selectedPassage?.page ?? 1;
-  // Summaries and bare page references have no place on the page to mark.
-  const highlight = selectedPassage?.kind === "page" && selectedPassage.snippet ? exact ?? selectedPassage.snippet : undefined;
-  const evidenceText = selectedPassage?.snippet || selectedResult?.reason;
+
+  /** The page a passage sits on, and the text to mark there; summaries and bare page references have no place to mark. */
+  function evidenceOf(passage: SearchPassage | undefined): { page: number; highlight?: string } {
+    const highlight = passage?.kind === "page" && passage.snippet ? exact ?? passage.snippet : undefined;
+    return { page: passage?.page ?? 1, highlight };
+  }
+  const evidence = evidenceOf(selectedPassage);
+  const page = browsedPage ?? evidence.page;
+  const highlight = page === evidence.page ? evidence.highlight : undefined;
 
   useEffect(() => {
-    if (!selectedResult) return;
+    if (!selectedResult || narrow) return;
     let cancelled = false;
     setPreviewLoading(true);
     setPreviewError("");
@@ -191,92 +216,105 @@ function Results({ results, answer, exact, terms, onOpen }: {
     return () => {
       cancelled = true;
     };
-  }, [selectedResult?.document.document_id, selectedResult?.document.status]);
+  }, [selectedResult?.document.document_id, selectedResult?.document.status, narrow]);
 
-  const citedTargets: EvidenceTarget[] = (answer?.citations ?? []).flatMap((index) => {
-    const result = results[index];
-    const passage = result?.passages[0];
-    return result && passage ? [{ result, passage }] : [];
-  });
+  // Answer citations are indexes into the results; each cited document carries its number in the list too.
+  const citations = (answer?.citations ?? []).filter((index, position, all) => results[index] && all.indexOf(index) === position);
+  const citationNumber = new Map(citations.map((index, position) => [index, position + 1]));
   const previewMatchesSelection = document?.document_id === selectedResult?.document.document_id;
   const currentPage = previewMatchesSelection ? pages.find((candidate) => candidate.page === page) : undefined;
   const previewDocument = previewMatchesSelection ? document : selectedResult?.document;
+  const pageCount = previewDocument?.page_count || 1;
+  useRevealMark(deskRef, highlight && previewMatchesSelection && !previewLoading ? `${selectedResult?.document.document_id}-${selectedPassage?.chunk_id}-${page}` : null);
 
-  function selectTarget(target: EvidenceTarget, reveal = false) {
-    setSelection({ documentId: target.result.document.document_id, chunkId: target.passage.chunk_id });
-    if (reveal && window.matchMedia("(max-width: 60rem)").matches) {
-      window.requestAnimationFrame(() => previewRef.current?.scrollIntoView({ block: "start" }));
+  /** Shows a passage beside the list; on a narrow screen there is no room beside it, so the passage opens in the reader. */
+  function show(result: SearchResult, passage: SearchPassage | undefined) {
+    if (narrow) {
+      const target = evidenceOf(passage);
+      onOpen(result.document, target.page, target.highlight);
+      return;
     }
+    setSelection({ documentId: result.document.document_id, chunkId: passage?.chunk_id ?? null });
   }
 
-  const isCurrent = (target: EvidenceTarget) =>
-    target.result.document.document_id === selectedResult?.document.document_id && target.passage.chunk_id === selectedPassage?.chunk_id;
-
   return <>
-    {answer && citedTargets.length > 0 && <section className="answer stock" aria-labelledby="answer-heading" aria-live="polite">
+    {answer && citations.length > 0 && <section className="answer stock" aria-labelledby="answer-heading" aria-live="polite">
       <h2 id="answer-heading" className="visually-hidden">Answer</h2>
-      <p className="answer__text">{answer.text}</p>
-      <ol className="answer__sources" aria-label="Where the answer comes from">
-        {citedTargets.map((target, index) => <li key={target.result.document.document_id}>
-          <button type="button" className="source" aria-pressed={isCurrent(target)} onClick={() => selectTarget(target, true)}>
-            <span className="source__n">{index + 1}</span>
-            <span className="source__name">{documentName(target.result.document)}</span>
-            <span className="source__page">p.&nbsp;{target.passage.page}</span>
-          </button>
-        </li>)}
-      </ol>
+      <p className="answer__text">
+        {answer.text}
+        <span className="cites">
+          {citations.map((index) => {
+            const result = results[index];
+            const passage = result.passages[0];
+            return <button
+              key={index}
+              type="button"
+              className="cite"
+              aria-pressed={!narrow && result.document.document_id === selectedResult?.document.document_id}
+              aria-label={`Source ${citationNumber.get(index)}: ${documentName(result.document)}, page ${passage?.page ?? 1}`}
+              title={`${documentName(result.document)}, page ${passage?.page ?? 1}`}
+              onClick={() => show(result, passage)}
+            >{citationNumber.get(index)}</button>;
+          })}
+        </span>
+      </p>
     </section>}
 
     <div className="evidence-split">
       <ol className="results" aria-label="Matching documents">
-        {results.map((result) => {
-          const selected = result.document.document_id === selectedResult?.document.document_id;
+        {results.map((result, index) => {
+          const selected = !narrow && result.document.document_id === selectedResult?.document.document_id;
           const name = documentName(result.document);
+          const first = result.passages[0];
+          const number = citationNumber.get(index);
+          // One line says why the document matched: the agent's reason, or the text an exact search found.
+          const why = exact
+            ? first?.snippet && <Marked text={excerptAround(first.snippet, exact)} terms={terms} />
+            : result.reason || (first?.snippet && <Marked text={first.snippet} terms={terms} words />);
           return <li key={result.document.document_id} className={`result${selected ? " is-selected" : ""}`}>
-            <button type="button" className="result__head" aria-pressed={selected} onClick={() => setSelection(firstSelection(result))}>
-              <span className="sheet sheet--mini"><Thumbnail document={result.document} /></span>
-              <span className="result__titles">
-                <span className="result__name">{name}</span>
-                <span className="result__meta">
-                  {[result.document.sender, formatDay(documentDate(result.document)), result.document.page_count ? plural(result.document.page_count, "page") : null].filter(Boolean).join(", ")}
-                </span>
-              </span>
-            </button>
-            {result.reason && <p className="result__reason">{result.reason}</p>}
-            {result.passages.length > 0 && <ul className="passages" aria-label={`Evidence in ${name}`}>
-              {result.passages.map((passage) => {
-                const current = selected && selectedPassage?.chunk_id === passage.chunk_id;
-                return <li key={passage.chunk_id}>
-                  <button type="button" className="passage" aria-pressed={current} onClick={() => selectTarget({ result, passage })}>
-                    <span className="passage__where">{passage.kind === "summary" ? "Summary" : `Page ${passage.page}`}</span>
-                    {passage.snippet && <span className="passage__text"><Marked text={exact ? excerptAround(passage.snippet, exact) : passage.snippet} terms={terms} words={!exact} /></span>}
-                  </button>
-                </li>;
-              })}
-            </ul>}
+            <button type="button" className="cover" aria-label={`Show ${name}`} aria-pressed={selected} onClick={() => show(result, first)} />
+            <span className="sheet sheet--mini"><Thumbnail document={result.document} /></span>
+            <div className="result__body">
+              <h3 className="result__name">
+                {number && <span className="result__n" aria-label={`Source ${number}`}>{number}</span>}
+                {name}
+              </h3>
+              <p className="result__meta">
+                {[result.document.sender, formatDay(documentDate(result.document))].filter(Boolean).join(", ")}
+              </p>
+              {why && <p className="result__why">{why}</p>}
+              {result.passages.length > 1 && <p className="found-on">
+                <span>Found on</span>
+                {result.passages.map((passage) => <button
+                  key={passage.chunk_id}
+                  type="button"
+                  className="found-on__page"
+                  aria-pressed={selected && selectedPassage?.chunk_id === passage.chunk_id}
+                  onClick={() => show(result, passage)}
+                >{passage.kind === "summary" ? "summary" : `p.\u00a0${passage.page}`}</button>)}
+              </p>}
+            </div>
           </li>;
         })}
       </ol>
 
-      <section className="evidence" ref={previewRef} aria-labelledby="evidence-title">
+      {!narrow && selectedResult && <section className="evidence" aria-label={`Page ${page} of ${documentName(selectedResult.document)}`}>
         <header className="evidence__head">
-          <div className="evidence__titles">
-            <h2 id="evidence-title" className="evidence__title">{selectedResult && documentName(selectedResult.document)}</h2>
-            <p className="evidence__where">
-              {selectedResult?.document.sender ? `${selectedResult.document.sender}, page ${page}` : `Page ${page}`}
-              {previewDocument?.page_count ? ` of ${previewDocument.page_count}` : ""}
-            </p>
+          <div className="page-nav">
+            <button type="button" className="icon-btn" aria-label="Previous page" disabled={page <= 1} onClick={() => setBrowsedPage(page - 1)}><ChevronLeft size={18} aria-hidden="true" /></button>
+            <p className="page-nav__where" aria-live="polite">Page {page} of {pageCount}</p>
+            <button type="button" className="icon-btn" aria-label="Next page" disabled={page >= pageCount} onClick={() => setBrowsedPage(page + 1)}><ChevronRight size={18} aria-hidden="true" /></button>
           </div>
-          {selectedResult && <button type="button" className="btn" onClick={() => onOpen(selectedResult.document, page, highlight)}><FileText size={16} aria-hidden="true" /> Open document</button>}
+          {page !== evidence.page && <button type="button" className="btn btn--text" onClick={() => setBrowsedPage(null)}>Back to page {evidence.page}</button>}
+          <button type="button" className="btn evidence__open" onClick={() => onOpen(selectedResult.document, page, highlight)}><FileText size={16} aria-hidden="true" /> Open document</button>
         </header>
-        {evidenceText && <blockquote className="evidence__quote"><Marked text={evidenceText} terms={terms} words={!exact} /></blockquote>}
-        <div className="evidence__desk" aria-busy={previewLoading || !previewMatchesSelection}>
+        <div className="evidence__desk" ref={deskRef} aria-busy={previewLoading || !previewMatchesSelection}>
           {previewError ? <p className="viewer-error">{previewError}</p>
             : previewLoading || !previewMatchesSelection ? <div className="page-loading" role="status"><span className="skeleton skeleton--page" /><span className="status-line"><Spinner /> Loading the page</span></div>
               : previewDocument ? <PageView document={previewDocument} page={page} blocks={currentPage?.blocks ?? []} highlight={highlight} />
                 : <p className="viewer-error">The page is unavailable.</p>}
         </div>
-      </section>
+      </section>}
     </div>
   </>;
 }

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode, type RefObject } from "react";
 import { FileText, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import type { Document } from "./api";
 import { stage } from "./format";
@@ -54,4 +54,31 @@ export function Alert({ message, onDismiss }: { message: string; onDismiss: () =
     <p>{message}</p>
     <button type="button" className="icon-btn" aria-label="Dismiss error" onClick={onDismiss}><X size={16} aria-hidden="true" /></button>
   </div>;
+}
+
+/**
+ * Scrolls `container` so the first marked passage inside it sits in view, once
+ * for each `key`. The page text layers render after the page itself, so this
+ * waits for the mark to appear.
+ */
+export function useRevealMark(container: RefObject<HTMLElement | null>, key: string | null) {
+  useEffect(() => {
+    const host = container.current;
+    if (!host || key === null) return;
+    function reveal(): boolean {
+      const mark = host!.querySelector<HTMLElement>(".evidence-match");
+      if (!mark) return false;
+      const offset = mark.getBoundingClientRect().top - host!.getBoundingClientRect().top + host!.scrollTop;
+      host!.scrollTo({ top: Math.max(0, offset - host!.clientHeight / 3) });
+      return true;
+    }
+    if (reveal()) return;
+    const observer = new MutationObserver(() => { if (reveal()) observer.disconnect(); });
+    observer.observe(host, { subtree: true, childList: true, attributes: true, attributeFilter: ["class"] });
+    const timeout = window.setTimeout(() => observer.disconnect(), 10_000);
+    return () => {
+      observer.disconnect();
+      window.clearTimeout(timeout);
+    };
+  }, [container, key]);
 }
