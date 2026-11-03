@@ -44,6 +44,7 @@ Bun.serve({
             results: run.result.results.length,
             answered: run.result.answer !== null,
             cost_usd: Number(run.costUsd.toFixed(5)),
+            providers: run.providers,
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

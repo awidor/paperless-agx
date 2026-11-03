@@ -4,11 +4,11 @@ paperless_url = "http://paperless-agx:3000"
 
 [model]
 # An OpenRouter model from Pi's catalog, with its reasoning effort.
-id = "openai/gpt-6.1-terra"
-reasoning = "low"
+id = "anthropic/claude-haiku-5.5"
+reasoning = "medium"
 api_key_env = "OPENROUTER_API_KEY"
 # OpenRouter providers to route to. Requests also require zero data retention.
-providers = ["azure"]
+providers = ["google-vertex", "amazon-bedrock"]
 
 [limits]
 # Model turns per search; the last one may only submit results.

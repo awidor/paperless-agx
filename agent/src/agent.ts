@@ -23,6 +23,8 @@ export type AgentRun = {
   turns: number;
   toolCalls: number;
   costUsd: number;
+  /** The upstream providers OpenRouter routed this run's requests to. */
+  providers: string[];
 };
 
 /** Runs one agentic search: the model looks things up with the tools, then submits ranked results. */
@@ -42,6 +44,7 @@ export async function runAgentSearch(
   onProgress({ kind: "thinking", label: "Planning the search" });
   const archive = await describeArchive(runtime.paperless, signal);
   const tools = createTools(context, runtime.paperless, { maxResults: runtime.maxResults });
+  const providers = new Set<string>();
   const agent = new Agent({
     initialState: {
       systemPrompt: systemPrompt({
@@ -56,6 +59,10 @@ export async function runAgentSearch(
     streamFn: runtime.streamFn,
     getApiKey: runtime.getApiKey,
     toolExecution: "parallel",
+    onProviderStreamEvent: (data) => {
+      const provider = (data as { provider?: unknown } | null)?.provider;
+      if (typeof provider === "string") providers.add(provider);
+    },
   });
 
   let turns = 0;
@@ -122,6 +129,7 @@ export async function runAgentSearch(
     turns,
     toolCalls,
     costUsd,
+    providers: [...providers],
   };
 }
 

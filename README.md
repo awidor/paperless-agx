@@ -6,7 +6,7 @@ Document OCR and agentic search with page references. Rust, React, SQLite, and a
 
 - Rust 1.96+, Bun 1.3+, Node.js 24, and Poppler (`poppler-utils`).
 - Local llama.cpp OCR server: Surya OCR 2.5 (`surya`, served with `--special`) or Chandra OCR 2 (`chandra`); choose with `[ocr] profile`.
-- OpenRouter API access for metadata and summaries, `google/gemini-embedding-2` search embeddings, and the search agent's model (`openai/gpt-6.1-terra`, set in `config/paperless-agent.toml`).
+- OpenRouter API access for metadata and summaries, `google/gemini-embedding-2` search embeddings, and the search agent's model (`anthropic/claude-haiku-5.5` on medium reasoning, set in `config/paperless-agent.toml`).
 - Copy `.env.example` to `.env` and set your API keys.
 - Set endpoints in `config/paperless-agx.toml`. Model-server example: `config/llama-models.ini`.
 
