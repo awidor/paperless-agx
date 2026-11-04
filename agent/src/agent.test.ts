@@ -80,8 +80,14 @@ test("rejects unknown documents, then returns checked results with archive text"
   const { faux, settings } = runtime(8);
   faux.setResponses([
     search,
-    call("submit_results", { results: [result(99, {})], answer: "212,50 Euro", answer_citations: [0] }),
     call("submit_results", {
+      query_language: "German",
+      results: [result(99, {})],
+      answer: "212,50 Euro",
+      answer_citations: [0],
+    }),
+    call("submit_results", {
+      query_language: "German",
       results: [result(7, { passage_id: passage.chunk_id })],
       answer: "**212,50 Euro** im Monat",
       answer_citations: [0],
@@ -105,6 +111,7 @@ test("forces a submission on the last turn and drops what it cannot verify", asy
     search,
     search,
     call("submit_results", {
+      query_language: "German",
       results: [result(99, {}), result(7, { quote: "Beitrag ab 01.06.2025 beträgt" })],
       answer: "Nicht belegt",
       answer_citations: [0],

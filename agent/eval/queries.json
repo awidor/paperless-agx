@@ -16,6 +16,6 @@
   { "query": "Welche Lastschriften sind im Oktober 2025 geplatzt?", "expected": [26], "answer": true, "facts": ["55[,.]08", "590"] },
   { "query": "Bis wann geht das Sommersemester 2026?", "expected": [81], "answer": true, "facts": ["0?4\\.\\s?10\\.\\s?2026|4\\.? Oktober 2026"] },
   { "query": "Wie hoch war die Bearbeitungspauschale für das Apartment insgesamt?", "expected": [65], "answer": true, "facts": ["178[,.]50"] },
-  { "query": "What was my gross pay in 2023 from the city of Kiel?", "expected": [58], "answer": true, "facts": ["11[.,]?290[,.]08"] },
+  { "query": "What was my gross pay in 2023 from the city of Kiel?", "expected": [58], "answer": true, "facts": ["11[.,]?290[,.]08", "\\b(your|pay|salary)\\b"] },
   { "query": "Seit wann bin ich bei der IKK versichert?", "expected": [47], "answer": true, "facts": ["0?1\\.\\s?0?4\\.\\s?2026|1\\.? April 2026"] }
 ]

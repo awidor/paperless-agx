@@ -9,6 +9,7 @@
  * "answer" is optional: true when the query asks for a fact the agent should
  * answer, false when it asks for documents and the answer must stay empty.
  * "facts" is optional: patterns (case-insensitive) the answer must all contain.
+ * An answer that names its source ("laut …", "according to …") is flagged: the citations do that.
  * --repeat runs every query that many times, since one run of a model varies.
  * --json writes every query's results and answer, for comparing runs side by side.
  */
@@ -31,6 +32,8 @@ type Score = {
   correct: boolean | null;
   /** Documents in the top 5 that the case does not expect. */
   extra: number;
+  /** Whether the answer names its source instead of leaving that to the citations. */
+  attributed: boolean;
   seconds: number;
   cost: number;
   turns: number;
@@ -39,6 +42,7 @@ type Score = {
 };
 
 const TOP = 5;
+const ATTRIBUTION = /\b(laut|gemäß|according to)\b/i;
 const { values, positionals } = parseArgs({
   args: Bun.argv.slice(2),
   options: {
@@ -91,6 +95,7 @@ async function score(item: Case): Promise<Score> {
       answered: item.answer === undefined ? null : item.answer === Boolean(answer),
       correct: correct(answer, item.facts),
       extra: found.slice(0, TOP).filter((id) => !item.expected.includes(id)).length,
+      attributed: answer !== null && ATTRIBUTION.test(answer),
       seconds: (performance.now() - started) / 1000,
       cost: run.costUsd,
       turns: run.turns,
@@ -106,6 +111,7 @@ async function score(item: Case): Promise<Score> {
       answered: null,
       correct: item.facts?.length ? false : null,
       extra: 0,
+      attributed: false,
       seconds: (performance.now() - started) / 1000,
       cost: 0,
       turns: 0,
@@ -138,7 +144,7 @@ const reasoning = runtime.reasoning;
 console.log(`model ${model} on ${reasoning} · recall in the top ${TOP}\n`);
 console.log("recall  answer  facts   extra  seconds   cost     query");
 for (const item of scores) {
-  const failure = item.error ? `  (${item.error})` : "";
+  const failure = item.error ? `  (${item.error})` : item.attributed ? "  (the answer names its source)" : "";
   const cost = `$${item.cost.toFixed(4)}`;
   console.log(
     `${percent(item.recall).padEnd(8)}${mark(item.answered).padEnd(8)}${mark(item.correct).padEnd(8)}${String(item.extra).padEnd(5)}${item.seconds.toFixed(1).padStart(7)}  ${cost.padStart(8)}  ${item.query}${failure}`,
@@ -160,6 +166,9 @@ const tally = (key: "answered" | "correct") => {
 console.log(
   `\nrecall ${percent(mean)} · median ${median.toFixed(1)} s · p90 ${p90.toFixed(1)} s · cost $${cost.toFixed(4)} ($${(cost / Math.max(scores.length, 1)).toFixed(4)} per search) · ${failed} failed`,
 );
-console.log(`answered when it should ${tally("answered")} · facts right ${tally("correct")} · ${extra.toFixed(1)} unexpected documents in the top ${TOP}`);
+const attributed = scores.filter((item) => item.attributed).length;
+console.log(
+  `answered when it should ${tally("answered")} · facts right ${tally("correct")} · ${attributed} name their source · ${extra.toFixed(1)} unexpected documents in the top ${TOP}`,
+);
 console.log(`served by ${providers}`);
 if (values.json) await Bun.write(values.json, JSON.stringify({ model, reasoning, scores }, null, 2));

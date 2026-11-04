@@ -151,7 +151,7 @@ function task(query: string, context: RunContext): string {
     createdTo ? `dated until ${createdTo.slice(0, 10)}` : null,
   ].filter(Boolean);
   const scope = limits.length > 0 ? `\n\nThe user limited the search to documents ${limits.join(", ")}. Every lookup applies this limit.` : "";
-  return `Search query: ${query}${scope}`;
+  return `Search query: ${query}${scope}\n\nWrite the answer and the reasons in the language this query is written in.`;
 }
 
 function progressFor(tool: string, args: any, context: RunContext): AgentProgress {

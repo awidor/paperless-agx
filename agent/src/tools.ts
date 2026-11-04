@@ -48,6 +48,11 @@ const readParameters = Type.Object({
 });
 
 const submitParameters = Type.Object({
+  // Named first so the model settles the language before it writes reasons and the answer;
+  // otherwise it drifts into the documents' German for queries in English.
+  query_language: Type.String({
+    description: "The language the search query is written in, such as English or German. Write every reason and the answer in it.",
+  }),
   results: Type.Array(
     Type.Object({
       document_id: Type.Integer(),
@@ -61,7 +66,10 @@ const submitParameters = Type.Object({
     { description: "Matching documents, best first. Empty when nothing matches." },
   ),
   answer: nullable(
-    Type.String({ description: "A short answer when the query asks something the documents state; else null." }),
+    Type.String({
+      description:
+        "A short answer when the query asks something the documents state; else null. Written in the query's language, not the documents'. States the fact directly, without saying which document it comes from.",
+    }),
   ),
   answer_citations: nullable(
     Type.Array(Type.Integer(), { description: "Indexes (from 0) into results of the documents that state the answer." }),
