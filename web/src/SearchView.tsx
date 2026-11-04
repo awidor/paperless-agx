@@ -54,8 +54,9 @@ function StepIcon({ kind }: { kind: AgentProgress["kind"] }) {
 function Trail({ steps, running, outcome }: { steps: AgentProgress[]; running: boolean; outcome: string }) {
   const lookups = steps.filter((step) => step.kind !== "thinking");
   const line = running
-    ? <><Spinner size={15} /><span className="trail__current">{steps.at(-1)?.label ?? "Starting the search"}</span></>
-    : <span>{outcome}</span>;
+    // Each new step takes the line with a short tick, so the change reads as progress.
+    ? <><Spinner size={15} /><span key={steps.length} className="trail__current">{steps.at(-1)?.label ?? "Starting the search"}</span></>
+    : <span className="trail__outcome">{outcome}</span>;
   if (lookups.length === 0) return <p className={`trail__line${running ? " trail__line--live" : ""}`}>{line}</p>;
   return <details className="trail">
     <summary className={`trail__line${running ? " trail__line--live" : ""}`}>{line}<ChevronDown size={14} aria-hidden="true" /></summary>
@@ -198,8 +199,10 @@ function Results({ results, answer, exact, onOpen }: {
     onOpen(result.document, placedPassage(result)?.page ?? 1, termsFor(result, exact));
   }
 
-  const source = (result: SearchResult, number: number | null, why: boolean) => <Source
+  // Rows land one after another under the answer; `order` is a row's place on the page.
+  const source = (result: SearchResult, number: number | null, why: boolean, order: number) => <Source
     key={result.document.document_id}
+    order={order}
     result={result}
     number={number}
     why={why}
@@ -236,14 +239,14 @@ function Results({ results, answer, exact, onOpen }: {
 
     {cited.length > 0 && <section className="sources" aria-labelledby="sources-heading">
       <h2 id="sources-heading" className="visually-hidden">{cited.length === 1 ? "Source" : "Sources"}</h2>
-      <ol className="sources__list">{cited.map((result, position) => source(result, numbered ? position + 1 : null, false))}</ol>
+      <ol className="sources__list">{cited.map((result, position) => source(result, numbered ? position + 1 : null, false, position + 1))}</ol>
     </section>}
 
     {others.length > 0 && <section className="sources" aria-labelledby="others-heading">
       {cited.length > 0
         ? <h2 id="others-heading" className="group-title sources__title">{plural(others.length, "more document")}</h2>
         : <h2 id="others-heading" className="visually-hidden">Documents</h2>}
-      <ol className="sources__list">{others.map((result) => source(result, null, true))}</ol>
+      <ol className="sources__list">{others.map((result, position) => source(result, null, true, cited.length + position + 1))}</ol>
     </section>}
   </div>;
 }
@@ -255,7 +258,8 @@ function pageCaption(page: number, pageCount: number, found: Found | null, exact
   return `Page ${page} of ${pageCount}`;
 }
 
-function Source({ result, number, why, exact, hinted, onOpen }: {
+function Source({ order, result, number, why, exact, hinted, onOpen }: {
+  order: number;
   result: SearchResult;
   number: number | null;
   /** Show the agent's reason; a cited document's evidence is already in the answer and on the strip. */
@@ -279,7 +283,7 @@ function Source({ result, number, why, exact, hinted, onOpen }: {
   const otherPages = [...new Set(result.passages.filter((item) => item.kind === "page" && item.page !== page).map((item) => item.page))];
   const caption = summary ? null : pageCaption(page, document.page_count, found, exact !== null);
 
-  return <li className={`source${hinted ? " is-hinted" : ""}`}>
+  return <li className={`source${hinted ? " is-hinted" : ""}`} style={{ ["--i" as string]: order }}>
     <div className="source__text">
       <h3 className="source__title">
         {number !== null && <><span className="source__n" aria-hidden="true">{number}</span><span className="visually-hidden">Source {number}: </span></>}

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { PageInfo } from "./api";
 import { markedRuns } from "./evidenceHighlight";
+import { inkIn } from "./motion";
 import { fitFontSize } from "./OcrTextLayer";
 
 /** Labels whose payload is a graphic; rendered as crops of the page image. */
@@ -214,6 +215,8 @@ function FigureCrop({ block, imageUrl }: { block: ReplicaBlock; imageUrl: string
   return (
     <div className="digital-figure" data-label={block.label} style={blockStyle(block.bbox)}>
       <img
+        ref={inkIn}
+        className="ink"
         src={imageUrl}
         alt=""
         draggable={false}

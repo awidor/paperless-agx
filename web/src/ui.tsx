@@ -2,13 +2,15 @@ import { useEffect, useState, type ReactNode, type RefObject } from "react";
 import { FileText, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import type { Document } from "./api";
 import { stage } from "./format";
+import { inkIn } from "./motion";
 
 /** A page render of the document, or a blank sheet while there is none yet. */
 export function Thumbnail({ document, page = 1, priority = false }: { document: Document; page?: number; priority?: boolean }) {
   const [missing, setMissing] = useState(false);
   if (missing) return <span className="sheet__blank" aria-hidden="true"><FileText size={20} /></span>;
   return <img
-    className="doc-image"
+    ref={inkIn}
+    className="doc-image ink"
     src={`/api/documents/${document.document_id}/thumbnails/${page}`}
     alt=""
     width={210}

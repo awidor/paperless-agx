@@ -6,6 +6,7 @@ import type { TextContent } from "pdfjs-dist/types/src/display/api";
 import type { OcrBlock } from "./api";
 import { EvidenceMarks } from "./EvidenceMarks";
 import { markBoxes, type Box, type Run } from "./evidenceHighlight";
+import { EASE_OUT, motionAllowed } from "./motion";
 import { OcrTextLayer } from "./OcrTextLayer";
 import { bindPageTextSelection } from "./pageTextSelection";
 
@@ -42,6 +43,8 @@ export function PdfViewer({ url, page, blocks, marks }: { url: string; page: num
   const [available, setAvailable] = useState(0);
   const [embeddedText, setEmbeddedText] = useState(false);
   const [evidence, setEvidence] = useState<Box[]>([]);
+  /** The page last painted on the canvas; a repaint of it at a new size shows at once. */
+  const paintedPage = useRef<number | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -103,6 +106,11 @@ export function PdfViewer({ url, page, blocks, marks }: { url: string; page: num
       if (!context) throw new Error("The PDF canvas is not available.");
       renderTask = pdfPage.render({ canvas, canvasContext: context, viewport, transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0] });
       await renderTask.promise;
+      // The ink of a new page settles onto the sheet instead of appearing all at once.
+      if (paintedPage.current !== page) {
+        paintedPage.current = page;
+        if (motionAllowed()) canvas.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: EASE_OUT });
+      }
       const textContent = await pdfPage.getTextContent();
       const container = textLayerRef.current;
       if (cancelled || !container) return;

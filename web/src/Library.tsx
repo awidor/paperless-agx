@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronLeft, ChevronRight, LayoutGrid, Rows3, SlidersHorizontal, Upload } from "lucide-react";
 import type { Document, DocumentPageResult, DocumentSort, LibraryQuery } from "./api";
 import { documentDate, documentName, formatBytes, formatDay, groupDocuments, isProcessing, plural, type Group } from "./format";
+import { useGrooveThumb } from "./motion";
 import { EmptyState, StageMeter, Thumbnail } from "./ui";
 
 export type View = "grid" | "list";
@@ -75,7 +76,8 @@ export function FilterBar({ query, senders, open, withSort, onChange }: {
 }
 
 function ViewSwitch({ view, onView }: { view: View; onView: (view: View) => void }) {
-  return <div className="groove" role="group" aria-label="Document view">
+  const groove = useGrooveThumb(view);
+  return <div className="groove" ref={groove} role="group" aria-label="Document view">
     <button type="button" className="groove__option" aria-pressed={view === "grid"} onClick={() => onView("grid")}><LayoutGrid size={16} aria-hidden="true" /> Grid</button>
     <button type="button" className="groove__option" aria-pressed={view === "list"} onClick={() => onView("list")}><Rows3 size={16} aria-hidden="true" /> List</button>
   </div>;
@@ -118,13 +120,17 @@ function Shelf({ groups, ...handlers }: { groups: Group[] } & Handlers) {
     {groups.map((group) => <section key={group.key} className="shelf-group" aria-label={group.label ?? "Documents"}>
       {group.label && <h2 className="group-title">{group.label}</h2>}
       <ul className="sheet-grid" role="list">
-        {group.items.map((document) => <li key={document.document_id}><SheetCard document={document} priority={index++ < EAGER_SHEETS} {...handlers} /></li>)}
+        {group.items.map((document) => {
+          const at = index++;
+          return <li key={document.document_id} style={{ ["--i" as string]: at }}><SheetCard document={document} priority={at < EAGER_SHEETS} {...handlers} /></li>;
+        })}
       </ul>
     </section>)}
   </div>;
 }
 
 function Ledger({ groups, onOpen, onFilterSender }: { groups: Group[] } & Handlers) {
+  let index = 0;
   return <div className="ledger-wrap">
     <table className="ledger">
       <thead>
@@ -134,7 +140,7 @@ function Ledger({ groups, onOpen, onFilterSender }: { groups: Group[] } & Handle
         {group.label && <tr className="ledger__group"><th scope="colgroup" colSpan={6}>{group.label}</th></tr>}
         {group.items.map((document) => {
           const name = documentName(document);
-          return <tr key={document.document_id} className="ledger__row">
+          return <tr key={document.document_id} className="ledger__row" style={{ ["--i" as string]: index++ }}>
             <td className="ledger__doc">
               <button type="button" className="cover" aria-label={`Open ${name}`} onClick={() => onOpen(document)} />
               <div className="ledger__doc-inner">

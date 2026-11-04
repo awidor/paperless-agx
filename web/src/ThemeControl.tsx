@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import { flushSync } from "react-dom";
 import { Monitor, Moon, Sun } from "lucide-react";
+import { motionAllowed } from "./motion";
 
 type Theme = "system" | "light" | "dark";
 const storageKey = "paperless-agx-theme";
@@ -14,23 +16,37 @@ function readTheme(): Theme {
   }
 }
 
+const system = () => window.matchMedia("(prefers-color-scheme: dark)");
+
+function applyTheme(theme: Theme) {
+  const root = document.documentElement;
+  root.dataset.theme = theme === "system" ? (system().matches ? "dark" : "light") : theme;
+  // The browser chrome takes the paper colour of whichever theme is showing.
+  const paper = getComputedStyle(root).getPropertyValue("--color-paper").trim();
+  if (paper) document.querySelector('meta[name="theme-color"]')?.setAttribute("content", paper);
+}
+
 /** The colour theme: follows the system unless the reader picks one, and stays in step across tabs. */
 export function ThemeControl() {
   const [theme, setTheme] = useState<Theme>(readTheme);
 
   useEffect(() => {
-    const system = window.matchMedia("(prefers-color-scheme: dark)");
-    function applyTheme() {
-      const root = document.documentElement;
-      root.dataset.theme = theme === "system" ? (system.matches ? "dark" : "light") : theme;
-      // The browser chrome takes the paper colour of whichever theme is showing.
-      const paper = getComputedStyle(root).getPropertyValue("--color-paper").trim();
-      if (paper) document.querySelector('meta[name="theme-color"]')?.setAttribute("content", paper);
-    }
-    applyTheme();
-    system.addEventListener("change", applyTheme);
-    return () => system.removeEventListener("change", applyTheme);
+    const media = system();
+    const follow = () => applyTheme(theme);
+    follow();
+    media.addEventListener("change", follow);
+    return () => media.removeEventListener("change", follow);
   }, [theme]);
+
+  /** A theme the reader picks crossfades in; the old page is captured before anything changes. */
+  function choose(next: Theme) {
+    const swap = () => {
+      flushSync(() => setTheme(next));
+      applyTheme(next);
+    };
+    if (document.startViewTransition && motionAllowed()) document.startViewTransition(swap);
+    else swap();
+  }
 
   useEffect(() => {
     function syncTheme(event: StorageEvent) {
@@ -48,7 +64,7 @@ export function ThemeControl() {
       value={theme}
       onChange={(event) => {
         const next = event.target.value as Theme;
-        setTheme(next);
+        choose(next);
         try {
           localStorage.setItem(storageKey, next);
         } catch {

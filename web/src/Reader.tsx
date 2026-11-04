@@ -12,6 +12,7 @@ import {
 } from "./api";
 import { DigitalPage } from "./DigitalPage";
 import { documentName, formatBytes, formatDay, isProcessing, stage } from "./format";
+import { EASE_OUT, inkIn, motionAllowed, useGrooveThumb } from "./motion";
 import { PageView } from "./PageView";
 import { Alert, EmptyState, Spinner, StageMeter, useRevealMark } from "./ui";
 
@@ -57,6 +58,8 @@ export function Reader({ documentId, initialPage, marks, marksPage, senders, onP
   const dialogRef = useRef<HTMLDialogElement>(null);
   const stageRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLElement>(null);
+  const turnRef = useRef({ page, tab });
+  const tabs = useGrooveThumb(tab);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -77,6 +80,17 @@ export function Reader({ documentId, initialPage, marks, marksPage, senders, onP
   useEffect(() => {
     stageRef.current?.scrollTo({ top: 0 });
     railRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [page, tab]);
+
+  // A new page slides in a little from the side it comes from; a new view of the same page only fades in.
+  useEffect(() => {
+    const previous = turnRef.current;
+    turnRef.current = { page, tab };
+    if (previous.page === page && previous.tab === tab) return;
+    const sheet = stageRef.current?.querySelector<HTMLElement>(".reader__page");
+    if (!sheet || !motionAllowed()) return;
+    const shift = previous.tab !== tab ? 0 : page > previous.page ? 12 : -12;
+    sheet.animate([{ opacity: 0, transform: `translateX(${shift}px)` }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE_OUT });
   }, [page, tab]);
 
   async function load(preserveEdits = false) {
@@ -241,7 +255,7 @@ export function Reader({ documentId, initialPage, marks, marksPage, senders, onP
         {document && <p className="reader__sub">{document.sender || document.filename}</p>}
       </div>
       {document && <div className="reader__controls">
-        <div className="groove" role="tablist" aria-label="Document views">
+        <div className="groove" ref={tabs} role="tablist" aria-label="Document views">
           <button type="button" id="preview-tab" role="tab" className="groove__option" aria-selected={tab === "preview"} aria-controls="reader-view" onClick={() => setTab("preview")}>Page</button>
           <button type="button" id="text-tab" role="tab" className="groove__option" aria-selected={tab === "text"} aria-controls="reader-view" onClick={() => setTab("text")}>OCR text</button>
         </div>
@@ -262,7 +276,7 @@ export function Reader({ documentId, initialPage, marks, marksPage, senders, onP
     </div> : <div className="reader__body">
       <nav className="reader__pages" ref={railRef} aria-label="Pages">
         {pages.map((item) => <button key={item.page} type="button" className="page-thumb" aria-label={`Show page ${item.page}`} aria-pressed={item.page === page} onClick={() => selectPage(item.page)}>
-          <span className="sheet sheet--page"><img className="doc-image" src={`/api/documents/${documentId}/thumbnails/${item.page}`} alt="" width={210} height={297} loading={item.page <= 4 ? "eager" : "lazy"} draggable={false} /></span>
+          <span className="sheet sheet--page"><img ref={inkIn} className="doc-image ink" src={`/api/documents/${documentId}/thumbnails/${item.page}`} alt="" width={210} height={297} loading={item.page <= 4 ? "eager" : "lazy"} draggable={false} /></span>
           <span className="page-thumb__n">{item.page}</span>
         </button>)}
       </nav>

@@ -3,6 +3,7 @@ import { FileText } from "lucide-react";
 import { getPages, type Document } from "./api";
 import { EvidenceMarks } from "./EvidenceMarks";
 import { frameEvidence, markBoxes, matchRuns, type Frame, type FrameShape, type Ink, type Run } from "./evidenceHighlight";
+import { inkIn } from "./motion";
 import { loadPdfjs, textRuns } from "./PdfViewer";
 
 type Layout = { aspect: number; ink: Ink | null; runs: Run[] };
@@ -146,7 +147,7 @@ export function PaperCrop({ document, page, terms, shape, label, onFound }: {
         transform: `translate(${-frame.x * 100}%, ${-frame.y * 100}%)`,
       }}
     >
-      <img className="doc-image" src={pageImage(document, page)} alt="" draggable={false} />
+      <img ref={inkIn} className="doc-image ink" src={pageImage(document, page)} alt="" draggable={false} />
       <EvidenceMarks boxes={frame.marks} />
     </div>
   </div>;
