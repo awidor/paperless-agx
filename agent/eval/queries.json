@@ -1,4 +1,21 @@
 [
   { "query": "Krankmeldungen vom Oktober 2025", "expected": [37, 32, 28, 29, 30], "answer": false },
-  { "query": "Wie viel habe ich im Februar 2026 verdient?", "expected": [48], "answer": true }
+  { "query": "Lohnsteuerbescheinigung 2023", "expected": [58], "answer": false },
+  { "query": "Verdienstnachweise der Regio Zustellservice", "expected": [48, 46, 45], "answer": false },
+  { "query": "Studienbescheinigungen", "expected": [81, 27, 23], "answer": false },
+  { "query": "Steuerbescheid 2023", "expected": [61, 62, 60, 63], "answer": false },
+  { "query": "Rechnung der Hausverwaltung", "expected": [65], "answer": false },
+  { "query": "Arztbericht zum Ellenbogen", "expected": [25, 24], "answer": false },
+  { "query": "Terminbestätigungen vom Klinikum", "expected": [43, 38, 36, 31], "answer": false },
+  { "query": "birth certificate", "expected": [53], "answer": false },
+  { "query": "Wohnungsgeberbestätigung", "expected": [66], "answer": false },
+  { "query": "Wie viel habe ich im Februar 2026 verdient?", "expected": [48], "answer": true, "facts": ["379[,.]98|367[,.]54|360[,.]64"] },
+  { "query": "Wie hoch ist mein monatlicher Beitrag bei der Continental BKK?", "expected": [22, 21], "answer": true, "facts": ["261[,.]28"] },
+  { "query": "Wie viel Einkommensteuer habe ich für 2023 zurückbekommen?", "expected": [61], "answer": true, "facts": ["737"] },
+  { "query": "Wie lautet meine Rundfunkbeitragsnummer?", "expected": [10, 12], "answer": true, "facts": ["285 ?334 ?268"] },
+  { "query": "Welche Lastschriften sind im Oktober 2025 geplatzt?", "expected": [26], "answer": true, "facts": ["55[,.]08", "590"] },
+  { "query": "Bis wann geht das Sommersemester 2026?", "expected": [81], "answer": true, "facts": ["0?4\\.\\s?10\\.\\s?2026|4\\.? Oktober 2026"] },
+  { "query": "Wie hoch war die Bearbeitungspauschale für das Apartment insgesamt?", "expected": [65], "answer": true, "facts": ["178[,.]50"] },
+  { "query": "What was my gross pay in 2023 from the city of Kiel?", "expected": [58], "answer": true, "facts": ["11[.,]?290[,.]08"] },
+  { "query": "Seit wann bin ich bei der IKK versichert?", "expected": [47], "answer": true, "facts": ["0?1\\.\\s?0?4\\.\\s?2026|1\\.? April 2026"] }
 ]
