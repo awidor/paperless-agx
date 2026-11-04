@@ -31,11 +31,12 @@ function pagingKey(event: KeyboardEvent): -1 | 1 | 0 {
   return 0;
 }
 
-export function Reader({ documentId, initialPage, highlight, highlightPage, senders, onPageChange, onDirtyChange, onClose, onChanged }: {
+export function Reader({ documentId, initialPage, marks, marksPage, senders, onPageChange, onDirtyChange, onClose, onChanged }: {
   documentId: number;
   initialPage: number;
-  highlight?: string;
-  highlightPage?: number;
+  /** Terms to mark on `marksPage`, the page a search result pointed at. */
+  marks?: string[];
+  marksPage?: number;
   senders: string[];
   onPageChange: (page: number) => void;
   onDirtyChange: (dirty: boolean) => void;
@@ -214,12 +215,12 @@ export function Reader({ documentId, initialPage, highlight, highlightPage, send
 
   const current = pages.find((item) => item.page === page);
   const blocks = current?.blocks ?? [];
-  const pageHighlight = page === highlightPage ? highlight : undefined;
+  const pageMarks = page === marksPage ? marks : undefined;
   const savedDate = document?.created_at?.slice(0, 10) || "";
   const dirty = document !== null
     && (title !== (document.title || "") || sender !== (document.sender || "") || createdAt !== savedDate);
   const pageCount = document?.page_count || 1;
-  useRevealMark(stageRef, pageHighlight && document ? `${page}-${tab}` : null);
+  useRevealMark(stageRef, pageMarks?.length && document ? `${page}-${tab}` : null);
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -269,8 +270,8 @@ export function Reader({ documentId, initialPage, highlight, highlightPage, send
       <section className="reader__stage" id="reader-view" role="tabpanel" aria-labelledby={tab === "preview" ? "preview-tab" : "text-tab"} ref={stageRef}>
         <div className="reader__page">
           {tab === "text"
-            ? <DigitalPage documentId={documentId} page={current} highlight={pageHighlight} />
-            : <PageView document={document} page={page} blocks={blocks} highlight={pageHighlight} />}
+            ? <DigitalPage documentId={documentId} page={current} marks={pageMarks} />
+            : <PageView document={document} page={page} blocks={blocks} marks={pageMarks} />}
         </div>
         {tab === "preview" && blocks.length > 0 && <p className="reader__hint">Drag across the page text to select and copy it.</p>}
       </section>

@@ -1,21 +1,22 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BookOpen, ChevronDown, ChevronLeft, ChevronRight, FileText, List, Search } from "lucide-react";
-import { getDocument, getPages, type AgentProgress, type Document, type PageInfo, type SearchPassage } from "./api";
+import { useState, type KeyboardEvent, type ReactNode } from "react";
+import { BookOpen, ChevronDown, List, Search } from "lucide-react";
+import type { AgentProgress, Document, SearchPassage } from "./api";
+import { evidenceTerms, type FrameShape } from "./evidenceHighlight";
 import { documentDate, documentName, formatDay, plural } from "./format";
 import { Marked } from "./Marked";
-import { PageView } from "./PageView";
+import { PaperCrop, type Found } from "./PaperCrop";
 import type { SearchAnswer, SearchResult, SearchState } from "./search";
-import { EmptyState, Spinner, Thumbnail, useRevealMark } from "./ui";
-
-type Selection = { documentId: number; chunkId: number | null };
+import { EmptyState, Spinner } from "./ui";
 
 const EXCERPT_CHARS = 220;
 
-function firstSelection(result: SearchResult | undefined): Selection {
-  return { documentId: result?.document.document_id ?? 0, chunkId: result?.passages[0]?.chunk_id ?? null };
-}
+/**
+ * The slice of paper beside each source: the same share of the page for every
+ * row, so all strips show the paper at one scale and only their height varies.
+ */
+const STRIP: FrameShape = { width: 0.45, minAspect: 1.5, maxAspect: 3.2 };
 
-/** A short window of the passage around the exact text, so the match is visible in the list. */
+/** A short window of a summary around the exact text, so the match is visible. */
 function excerptAround(text: string, needle: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
   const index = flat.toLocaleLowerCase().indexOf(needle.replace(/\s+/g, " ").toLocaleLowerCase());
@@ -25,23 +26,18 @@ function excerptAround(text: string, needle: string): string {
   return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
 }
 
-function times(count: number): string {
-  return count === 1 ? "once" : `${count} times`;
+/** Keeps a figure on the same line as its unit, so "367,54 €" never breaks before the euro sign. */
+function tidy(text: string): string {
+  return text.replace(/(\d) (€|%|EUR\b)/g, "$1\u00a0$2");
 }
 
-function trailSummary(steps: AgentProgress[], seconds: number | null): string {
-  const count = (kind: AgentProgress["kind"]) => steps.filter((step) => step.kind === kind).length;
-  const searches = count("search");
-  const lists = count("list");
-  const reads = count("read");
-  const parts = [
-    searches > 0 && `searched ${times(searches)}`,
-    lists > 0 && `listed documents ${times(lists)}`,
-    reads > 0 && `read ${plural(reads, "document")}`,
-  ].filter((part): part is string => Boolean(part));
-  const actions = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0] ?? "looked through the library";
-  const ending = seconds === null ? " before it stopped" : ` in ${seconds.toFixed(1)} s`;
-  return `${actions[0].toUpperCase()}${actions.slice(1)}${ending}`;
+/** Whether a title already names the day, as 24.10.2025 or as the date line would print it. */
+function namesDay(title: string, day: Date): boolean {
+  const d = day.getDate();
+  const m = day.getMonth() + 1;
+  const y = day.getFullYear();
+  const two = (value: number) => String(value).padStart(2, "0");
+  return [`${two(d)}.${two(m)}.${y}`, `${d}.${m}.${y}`, `${y}-${two(m)}-${two(d)}`, formatDay(day)].some((form) => title.includes(form));
 }
 
 function StepIcon({ kind }: { kind: AgentProgress["kind"] }) {
@@ -50,271 +46,267 @@ function StepIcon({ kind }: { kind: AgentProgress["kind"] }) {
   return <Search size={15} aria-hidden="true" />;
 }
 
-function TrailSteps({ steps, running }: { steps: AgentProgress[]; running: boolean }) {
+/**
+ * The line under the search field. While the agent works, the step it is on;
+ * once it is done, what it found and how long it took. Either way the line
+ * opens into the lookups it made.
+ */
+function Trail({ steps, running, outcome }: { steps: AgentProgress[]; running: boolean; outcome: string }) {
   const lookups = steps.filter((step) => step.kind !== "thinking");
-  const last = steps.at(-1);
-  return <ol className="trail__steps">
-    {lookups.map((step, index) => {
-      const current = running && step === last;
-      return <li key={index} className={`trail__step${current ? " is-current" : ""}`}>
-        {current ? <Spinner size={15} /> : <StepIcon kind={step.kind} />}
-        <span>{step.label}</span>
-      </li>;
-    })}
-    {running && (!last || last.kind === "thinking") && <li className="trail__step is-current">
-      <Spinner size={15} />
-      <span>{last?.label ?? "Starting the search"}</span>
-    </li>}
-  </ol>;
-}
-
-/** The lookups the agent made, folded into one line once the search is done. */
-function TrailSummary({ steps, seconds }: { steps: AgentProgress[]; seconds: number | null }) {
+  const line = running
+    ? <><Spinner size={15} /><span className="trail__current">{steps.at(-1)?.label ?? "Starting the search"}</span></>
+    : <span>{outcome}</span>;
+  if (lookups.length === 0) return <p className={`trail__line${running ? " trail__line--live" : ""}`}>{line}</p>;
   return <details className="trail">
-    <summary>{trailSummary(steps, seconds)}<ChevronDown size={14} aria-hidden="true" /></summary>
-    <TrailSteps steps={steps} running={false} />
+    <summary className={`trail__line${running ? " trail__line--live" : ""}`}>{line}<ChevronDown size={14} aria-hidden="true" /></summary>
+    <ol className="trail__steps">
+      {lookups.map((step, index) => <li key={index} className="trail__step"><StepIcon kind={step.kind} /><span>{step.label}</span></li>)}
+    </ol>
   </details>;
 }
 
-export function SearchView({ query, state, terms, hasFilters, toolbar, filters, onOpen, onRetry, onClearFilters }: {
+type Open = (document: Document, page: number, marks?: string[]) => void;
+
+/** The passage that has a place on the paper, or the first one when none has. */
+function placedPassage(result: SearchResult): SearchPassage | undefined {
+  return result.passages.find((passage) => passage.kind === "page") ?? result.passages[0];
+}
+
+/** What to look for on the page: the quoted text, or the figures in the agent's reason. */
+function termsFor(result: SearchResult, exact: string | null): string[] {
+  return exact ? [exact] : evidenceTerms(result.reason);
+}
+
+export function SearchView({ query, state, hasFilters, toolbar, filters, onOpen, onRetry, onClearFilters }: {
   query: string;
   state: SearchState | null;
-  terms: string[];
   hasFilters: boolean;
   toolbar: ReactNode;
   filters: ReactNode;
-  onOpen: (document: Document, page: number, highlight?: string) => void;
+  onOpen: Open;
   onRetry: () => void;
   onClearFilters: () => void;
 }) {
   const exact = state?.mode === "exact" && "text" in state ? state.text : null;
   const done = state?.status === "done" ? state : null;
-  const count = !state ? "" : state.status === "running" ? "Searching" : state.status === "failed" ? "" : exact
-    ? `${plural(state.results.length, "document")} ${state.results.length === 1 ? "contains" : "contain"} this text`
-    : plural(state.results.length, "document");
+  const found = done ? done.results.length : 0;
 
-  const trail = done?.mode === "agent"
-    ? <TrailSummary steps={done.steps} seconds={done.seconds} />
-    : state?.status === "failed" && state.steps.some((step) => step.kind !== "thinking")
-      ? <TrailSummary steps={state.steps} seconds={null} />
-      : null;
-
-  let body: ReactNode = null;
+  // The line beside Filters: what the search is doing, or what it found.
+  let status: ReactNode = null;
+  let announcement = "";
   if (state?.status === "running") {
-    body = state.mode === "agent"
-      ? <section className="trail trail--live stock" aria-live="polite" aria-label="What the search is doing"><TrailSteps steps={state.steps} running /></section>
-      : <p className="status-line" role="status"><Spinner /> Finding “{state.text}”</p>;
+    announcement = "Searching";
+    status = state.mode === "agent"
+      ? <Trail steps={state.steps} running outcome="" />
+      : <p className="trail__line trail__line--live"><Spinner size={15} /><span className="trail__current">Looking for “{state.text}” as written</span></p>;
   } else if (state?.status === "failed") {
-    body = <>
-      <EmptyState alert title={state.mode === "agent" ? "The search stopped before it found anything" : "The exact-text search failed"} action={<button type="button" className="btn" onClick={onRetry}>Search again</button>}>
-        {state.message}
-      </EmptyState>
-    </>;
-  } else if (done) {
-    body = done.results.length === 0 ? <>
-      <EmptyState title="No document matches" action={hasFilters && <button type="button" className="btn" onClick={onClearFilters}>Clear filters</button>}>
-        {done.mode === "exact"
-          ? `No page contains “${done.text}” as written. Search without quotes to find it by what it means.`
-          : hasFilters
-            ? "Nothing within the current filters matches. Clear them to search the whole library."
-            : "Describe the document differently, or put words in quotes to find that exact text."}
-      </EmptyState>
-    </> : <>
-      <Results
-        results={done.results}
-        answer={done.mode === "agent" ? done.answer : null}
-        exact={exact}
-        terms={exact ? [exact] : terms}
-        onOpen={onOpen}
-      />
-    </>;
+    status = <EmptyState alert title={state.mode === "agent" ? "The search stopped before it found anything" : "The exact-text search failed"} action={<button type="button" className="btn" onClick={onRetry}>Search again</button>}>
+      {state.message}
+    </EmptyState>;
+  } else if (done && found === 0) {
+    status = <EmptyState live title="No document matches" action={hasFilters && <button type="button" className="btn" onClick={onClearFilters}>Clear filters</button>}>
+      {done.mode === "exact"
+        ? `No page contains “${done.text}” as written. Search without quotes to find it by what it means.`
+        : hasFilters
+          ? "Nothing within the current filters matches. Clear them to search the whole library."
+          : "Describe the document differently, or put words in quotes to find that exact text."}
+    </EmptyState>;
+  } else if (done?.mode === "agent") {
+    announcement = `Found ${plural(found, "document")}`;
+    status = <Trail steps={done.steps} running={false} outcome={`Found ${plural(found, "document")} in ${done.seconds.toFixed(1)} s`} />;
+  } else if (done?.mode === "exact") {
+    announcement = `${plural(found, "document")} ${found === 1 ? "contains" : "contain"} this text`;
+    status = <p className="trail__line">{plural(found, "document")} {found === 1 ? "contains" : "contain"} <span className="ask__quote">“{done.text}”</span></p>;
   }
 
+  const failedSteps = state?.status === "failed" ? state.steps.filter((step) => step.kind !== "thinking") : [];
+
   return <section className="view search" aria-labelledby="search-title">
-    <header className="view-head">
-      <div className="view-head__title view-head__title--search">
-        <h1 id="search-title" className="search-title">{exact ? `“${exact}”` : query}</h1>
-        <div className="search-meta">
-          <p className="view-head__count" aria-live="polite">{count}</p>
-          {trail}
-        </div>
+    <h1 id="search-title" className="visually-hidden">Search results for “{exact ?? query}”</h1>
+    <header className={`ask${state?.status === "failed" || (done && found === 0) ? " ask--empty" : ""}`}>
+      <div className="ask__status">
+        {status}
+        {failedSteps.length > 0 && <Trail steps={failedSteps} running={false} outcome={`${plural(failedSteps.length, "lookup")} before it stopped`} />}
       </div>
-      <div className="view-head__tools">{toolbar}</div>
+      <div className="ask__tools">{toolbar}</div>
     </header>
+    <p className="visually-hidden" aria-live="polite">{announcement}</p>
     {filters}
-    {body}
+    {state?.status === "running" && <Placeholder answer={state.mode === "agent"} />}
+    {done && found > 0 && <Results results={done.results} answer={done.mode === "agent" ? done.answer : null} exact={exact} onOpen={onOpen} />}
   </section>;
 }
 
-/** Matches narrow screens, where the reader takes the place of the side preview. */
-function useNarrow(): boolean {
-  const query = "(max-width: 60rem)";
-  const [narrow, setNarrow] = useState(() => window.matchMedia(query).matches);
-  useEffect(() => {
-    const media = window.matchMedia(query);
-    const update = () => setNarrow(media.matches);
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
-  return narrow;
+/** The shape of the results while the search runs, so they land without moving anything. */
+function Placeholder({ answer }: { answer: boolean }) {
+  return <div className="placeholder" aria-hidden="true">
+    {answer && <div className="answer">
+      <span className="skeleton skeleton--text" />
+      <span className="skeleton skeleton--text skeleton--short" />
+    </div>}
+    <ol className="sources__list">
+      {[0, 1, 2].map((index) => <li key={index} className="source">
+        <div className="source__text">
+          <span className="skeleton skeleton--line skeleton--title" />
+          <span className="skeleton skeleton--line skeleton--short" />
+        </div>
+        <div className="source__paper"><span className="paper paper--loading" style={{ aspectRatio: String(STRIP.maxAspect) }} /></div>
+      </li>)}
+    </ol>
+  </div>;
+}
+
+/** Up and Down step through the sources the way they step through a mail list; Enter opens one. */
+function stepThroughSources(event: KeyboardEvent<HTMLElement>) {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const target = event.target as HTMLElement;
+  if (!target.classList.contains("cover")) return;
+  const covers = [...event.currentTarget.querySelectorAll<HTMLElement>(".source > .cover")];
+  const next = covers[covers.indexOf(target) + (event.key === "ArrowDown" ? 1 : -1)];
+  if (!next) return;
+  event.preventDefault();
+  next.focus();
+  next.closest(".source")?.scrollIntoView({ block: "nearest" });
 }
 
 /**
- * The search results: the answer once, each document once with the one line
- * that says why it matched, and the evidence as the page itself with the
- * passage marked on it.
+ * The answer page: the agent's answer as prose, then each document once, its
+ * title and sender beside a strip of the paper with the evidence outlined.
+ *
+ * The answer and the strip already carry the evidence of a cited document, so
+ * its row leaves the agent's reason out. When the answer cites every result,
+ * the list right under it is its citation; only an answer that cites some of
+ * the results numbers them.
  */
-function Results({ results, answer, exact, terms, onOpen }: {
+function Results({ results, answer, exact, onOpen }: {
   results: SearchResult[];
   answer: SearchAnswer | null;
-  /** The quoted text for an exact-text search; it is what gets marked on the page. */
+  /** The quoted text for an exact-text search; it is what gets marked on the paper. */
   exact: string | null;
-  terms: string[];
-  onOpen: (document: Document, page: number, highlight?: string) => void;
+  onOpen: Open;
 }) {
-  const [selection, setSelection] = useState<Selection>(() => firstSelection(results[0]));
-  const [browsedPage, setBrowsedPage] = useState<number | null>(null);
-  const [document, setDocument] = useState<Document | null>(null);
-  const [pages, setPages] = useState<PageInfo[]>([]);
-  const [previewLoading, setPreviewLoading] = useState(true);
-  const [previewError, setPreviewError] = useState("");
-  const narrow = useNarrow();
-  const deskRef = useRef<HTMLDivElement>(null);
+  const [hinted, setHinted] = useState<number | null>(null);
+  const text = answer?.text ? tidy(answer.text) : null;
 
-  useEffect(() => setSelection(firstSelection(results[0])), [results]);
-  useEffect(() => setBrowsedPage(null), [selection.documentId, selection.chunkId]);
+  // Citations are indexes into the results; the cited documents come first, in the order the answer cites them.
+  const citations = text ? (answer?.citations ?? []).filter((index, position, all) => results[index] && all.indexOf(index) === position) : [];
+  const numbered = citations.length > 0 && citations.length < results.length;
+  const cited = citations.map((index) => results[index]);
+  const others = results.filter((_, index) => !citations.includes(index));
 
-  const selectedResult = results.find((result) => result.document.document_id === selection.documentId) ?? results[0];
-  const selectedPassage = selectedResult?.passages.find((passage) => passage.chunk_id === selection.chunkId) ?? selectedResult?.passages[0];
-
-  /** The page a passage sits on, and the text to mark there; summaries and bare page references have no place to mark. */
-  function evidenceOf(passage: SearchPassage | undefined): { page: number; highlight?: string } {
-    const highlight = passage?.kind === "page" && passage.snippet ? exact ?? passage.snippet : undefined;
-    return { page: passage?.page ?? 1, highlight };
-  }
-  const evidence = evidenceOf(selectedPassage);
-  const page = browsedPage ?? evidence.page;
-  const highlight = page === evidence.page ? evidence.highlight : undefined;
-
-  useEffect(() => {
-    if (!selectedResult || narrow) return;
-    let cancelled = false;
-    setPreviewLoading(true);
-    setPreviewError("");
-    void Promise.all([getDocument(selectedResult.document.document_id), getPages(selectedResult.document.document_id)])
-      .then(([nextDocument, nextPages]) => {
-        if (cancelled) return;
-        setDocument(nextDocument);
-        setPages(nextPages);
-      })
-      .catch((cause) => {
-        if (!cancelled) setPreviewError(cause instanceof Error ? cause.message : "The page preview failed to load.");
-      })
-      .finally(() => {
-        if (!cancelled) setPreviewLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedResult?.document.document_id, selectedResult?.document.status, narrow]);
-
-  // Answer citations are indexes into the results; each cited document carries its number in the list too.
-  const citations = (answer?.citations ?? []).filter((index, position, all) => results[index] && all.indexOf(index) === position);
-  const citationNumber = new Map(citations.map((index, position) => [index, position + 1]));
-  const previewMatchesSelection = document?.document_id === selectedResult?.document.document_id;
-  const currentPage = previewMatchesSelection ? pages.find((candidate) => candidate.page === page) : undefined;
-  const previewDocument = previewMatchesSelection ? document : selectedResult?.document;
-  const pageCount = previewDocument?.page_count || 1;
-  useRevealMark(deskRef, highlight && previewMatchesSelection && !previewLoading ? `${selectedResult?.document.document_id}-${selectedPassage?.chunk_id}-${page}` : null);
-
-  /** Shows a passage beside the list; on a narrow screen there is no room beside it, so the passage opens in the reader. */
-  function show(result: SearchResult, passage: SearchPassage | undefined) {
-    if (narrow) {
-      const target = evidenceOf(passage);
-      onOpen(result.document, target.page, target.highlight);
-      return;
-    }
-    setSelection({ documentId: result.document.document_id, chunkId: passage?.chunk_id ?? null });
+  function open(result: SearchResult) {
+    onOpen(result.document, placedPassage(result)?.page ?? 1, termsFor(result, exact));
   }
 
-  return <>
-    {answer && citations.length > 0 && <section className="answer stock" aria-labelledby="answer-heading" aria-live="polite">
+  const source = (result: SearchResult, number: number | null, why: boolean) => <Source
+    key={result.document.document_id}
+    result={result}
+    number={number}
+    why={why}
+    exact={exact}
+    hinted={number !== null && number === hinted}
+    onOpen={onOpen}
+  />;
+
+  return <div className="results" onKeyDown={stepThroughSources}>
+    {text && <section className="answer" aria-labelledby="answer-heading">
       <h2 id="answer-heading" className="visually-hidden">Answer</h2>
       <p className="answer__text">
-        {answer.text}
-        <span className="cites">
-          {citations.map((index) => {
-            const result = results[index];
-            const passage = result.passages[0];
+        {text}
+        {numbered && <span className="cites">
+          {cited.map((result, position) => {
+            const name = documentName(result.document);
+            const page = placedPassage(result)?.page ?? 1;
             return <button
-              key={index}
+              key={result.document.document_id}
               type="button"
-              className="cite"
-              aria-pressed={!narrow && result.document.document_id === selectedResult?.document.document_id}
-              aria-label={`Source ${citationNumber.get(index)}: ${documentName(result.document)}, page ${passage?.page ?? 1}`}
-              title={`${documentName(result.document)}, page ${passage?.page ?? 1}`}
-              onClick={() => show(result, passage)}
-            >{citationNumber.get(index)}</button>;
+              className={`badge cite${hinted === position + 1 ? " is-hinted" : ""}`}
+              aria-label={`Source ${position + 1}: open ${name}, page ${page}`}
+              title={name}
+              onMouseEnter={() => setHinted(position + 1)}
+              onMouseLeave={() => setHinted(null)}
+              onFocus={() => setHinted(position + 1)}
+              onBlur={() => setHinted(null)}
+              onClick={() => open(result)}
+            >{position + 1}</button>;
           })}
-        </span>
+        </span>}
       </p>
     </section>}
 
-    <div className="evidence-split">
-      <ol className="results" aria-label="Matching documents">
-        {results.map((result, index) => {
-          const selected = !narrow && result.document.document_id === selectedResult?.document.document_id;
-          const name = documentName(result.document);
-          const first = result.passages[0];
-          const number = citationNumber.get(index);
-          // One line says why the document matched: the agent's reason, or the text an exact search found.
-          const why = exact
-            ? first?.snippet && <Marked text={excerptAround(first.snippet, exact)} terms={terms} />
-            : result.reason || (first?.snippet && <Marked text={first.snippet} terms={terms} words />);
-          return <li key={result.document.document_id} className={`result${selected ? " is-selected" : ""}`}>
-            <button type="button" className="cover" aria-label={`Show ${name}`} aria-pressed={selected} onClick={() => show(result, first)} />
-            <span className="sheet sheet--mini"><Thumbnail document={result.document} /></span>
-            <div className="result__body">
-              <h3 className="result__name">
-                {number && <span className="result__n" aria-label={`Source ${number}`}>{number}</span>}
-                {name}
-              </h3>
-              <p className="result__meta">
-                {[result.document.sender, formatDay(documentDate(result.document))].filter(Boolean).join(", ")}
-              </p>
-              {why && <p className="result__why">{why}</p>}
-              {result.passages.length > 1 && <p className="found-on">
-                <span>Found on</span>
-                {result.passages.map((passage) => <button
-                  key={passage.chunk_id}
-                  type="button"
-                  className="found-on__page"
-                  aria-pressed={selected && selectedPassage?.chunk_id === passage.chunk_id}
-                  onClick={() => show(result, passage)}
-                >{passage.kind === "summary" ? "summary" : `p.\u00a0${passage.page}`}</button>)}
-              </p>}
-            </div>
-          </li>;
-        })}
-      </ol>
+    {cited.length > 0 && <section className="sources" aria-labelledby="sources-heading">
+      <h2 id="sources-heading" className="visually-hidden">{cited.length === 1 ? "Source" : "Sources"}</h2>
+      <ol className="sources__list">{cited.map((result, position) => source(result, numbered ? position + 1 : null, false))}</ol>
+    </section>}
 
-      {!narrow && selectedResult && <section className="evidence" aria-label={`Page ${page} of ${documentName(selectedResult.document)}`}>
-        <header className="evidence__head">
-          <div className="page-nav">
-            <button type="button" className="icon-btn" aria-label="Previous page" disabled={page <= 1} onClick={() => setBrowsedPage(page - 1)}><ChevronLeft size={18} aria-hidden="true" /></button>
-            <p className="page-nav__where" aria-live="polite">Page {page} of {pageCount}</p>
-            <button type="button" className="icon-btn" aria-label="Next page" disabled={page >= pageCount} onClick={() => setBrowsedPage(page + 1)}><ChevronRight size={18} aria-hidden="true" /></button>
-          </div>
-          {page !== evidence.page && <button type="button" className="btn btn--text" onClick={() => setBrowsedPage(null)}>Back to page {evidence.page}</button>}
-          <button type="button" className="btn evidence__open" onClick={() => onOpen(selectedResult.document, page, highlight)}><FileText size={16} aria-hidden="true" /> Open document</button>
-        </header>
-        <div className="evidence__desk" ref={deskRef} aria-busy={previewLoading || !previewMatchesSelection}>
-          {previewError ? <p className="viewer-error">{previewError}</p>
-            : previewLoading || !previewMatchesSelection ? <div className="page-loading" role="status"><span className="skeleton skeleton--page" /><span className="status-line"><Spinner /> Loading the page</span></div>
-              : previewDocument ? <PageView document={previewDocument} page={page} blocks={currentPage?.blocks ?? []} highlight={highlight} />
-                : <p className="viewer-error">The page is unavailable.</p>}
-        </div>
-      </section>}
+    {others.length > 0 && <section className="sources" aria-labelledby="others-heading">
+      {cited.length > 0
+        ? <h2 id="others-heading" className="group-title sources__title">{plural(others.length, "more document")}</h2>
+        : <h2 id="others-heading" className="visually-hidden">Documents</h2>}
+      <ol className="sources__list">{others.map((result) => source(result, null, true))}</ol>
+    </section>}
+  </div>;
+}
+
+/** Which page the strip shows, when the document has more than one, and how many matches it cannot show. */
+function pageCaption(page: number, pageCount: number, found: Found | null, exact: boolean): string | null {
+  if (pageCount <= 1) return null;
+  if (exact && found && found.places > found.shown) return `${plural(found.places, "match", "matches")} on page ${page} of ${pageCount}`;
+  return `Page ${page} of ${pageCount}`;
+}
+
+function Source({ result, number, why, exact, hinted, onOpen }: {
+  result: SearchResult;
+  number: number | null;
+  /** Show the agent's reason; a cited document's evidence is already in the answer and on the strip. */
+  why: boolean;
+  exact: string | null;
+  hinted: boolean;
+  onOpen: Open;
+}) {
+  const [found, setFound] = useState<Found | null>(null);
+  const { document } = result;
+  const name = documentName(document);
+  const passage = placedPassage(result);
+  const page = passage?.page ?? 1;
+  const terms = termsFor(result, exact);
+  const day = documentDate(document);
+  // A title that names the day already says what the date line would.
+  const date = namesDay(name, day) ? null : formatDay(day);
+  const reason = why && result.reason ? tidy(result.reason) : null;
+  // An exact match found only in the summary has no place on the paper, so the summary line shows it.
+  const summary = exact && passage?.kind === "summary" ? passage.snippet : null;
+  const otherPages = [...new Set(result.passages.filter((item) => item.kind === "page" && item.page !== page).map((item) => item.page))];
+  const caption = summary ? null : pageCaption(page, document.page_count, found, exact !== null);
+
+  return <li className={`source${hinted ? " is-hinted" : ""}`}>
+    <div className="source__text">
+      <h3 className="source__title">
+        {number !== null && <><span className="source__n" aria-hidden="true">{number}</span><span className="visually-hidden">Source {number}: </span></>}
+        {name}
+      </h3>
+      {(document.sender || date) && <p className="source__meta">
+        {document.sender && <span>{document.sender}{date ? ", " : ""}</span>}
+        {date && <span className="source__date">{date}</span>}
+      </p>}
+      {reason && <p className="source__why">{reason}</p>}
+      {summary && <p className="source__why"><Marked text={excerptAround(summary, exact ?? "")} terms={exact ? [exact] : []} /></p>}
+      {otherPages.length > 0 && <p className="source__pages">
+        <span>Also on</span>
+        {otherPages.map((other) => <button key={other} type="button" className="page-link" onClick={() => onOpen(document, other, terms)}>page {other}</button>)}
+      </p>}
     </div>
-  </>;
+    <figure className="source__paper">
+      <PaperCrop
+        document={document}
+        page={page}
+        terms={summary ? [] : terms}
+        shape={STRIP}
+        label={`Page ${page} of ${name}${terms.length && !summary ? ", with the matching text outlined" : ""}`}
+        onFound={setFound}
+      />
+      {caption && <figcaption className="source__where">{caption}</figcaption>}
+    </figure>
+    <button type="button" className="cover" aria-label={`Open ${name} at page ${page}`} onClick={() => onOpen(document, page, terms)} />
+  </li>;
 }

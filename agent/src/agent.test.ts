@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type JsonObject } from "@earendil-works/pi-ai";
-import { runAgentSearch, type AgentRuntime } from "./agent.ts";
+import { dateRange, runAgentSearch, type AgentRuntime } from "./agent.ts";
 import type { Paperless } from "./paperless.ts";
 import type { AgentProgress, Document, SearchPassage } from "./types.ts";
 
@@ -117,4 +117,11 @@ test("forces a submission on the last turn and drops what it cannot verify", asy
   expect(run.result.results[0].passage).toMatchObject({ chunk_id: 0, page: 1, snippet: "Beitrag ab 01.06.2025 beträgt" });
   // The only citation pointed at the dropped document, so the answer is not supported.
   expect(run.result.answer).toBeNull();
+});
+
+test("says a date filter the way a person would", () => {
+  expect(dateRange("2025-10-01", "2025-10-31")).toBe("in October 2025");
+  expect(dateRange("2024-01-01", "2024-12-31")).toBe("in 2024");
+  expect(dateRange("2025-10-03", "2025-10-17")).toBe("from Oct 3, 2025 to Oct 17, 2025");
+  expect(dateRange(null, "2025-06-30T23:59:59Z")).toBe("until Jun 30, 2025");
 });

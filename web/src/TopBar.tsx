@@ -47,7 +47,6 @@ export function TopBar({ inputRef, text, searching, busy, uploading, health, onT
           aria-label="Search documents"
         />
         <span className="search-field__end">
-          {busy && <Spinner label="Searching" />}
           {text || searching
             ? <button type="button" className="icon-btn icon-btn--sm" aria-label="Clear search" onClick={onClear}><X size={16} aria-hidden="true" /></button>
             : <kbd className="search-field__key" title="Press / to search">/</kbd>}

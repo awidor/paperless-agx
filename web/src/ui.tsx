@@ -57,7 +57,7 @@ export function Alert({ message, onDismiss }: { message: string; onDismiss: () =
 }
 
 /**
- * Scrolls `container` so the first marked passage inside it sits in view, once
+ * Scrolls `container` so the marked evidence inside it sits in view, once
  * for each `key`. The page text layers render after the page itself, so this
  * waits for the mark to appear.
  */
@@ -65,20 +65,33 @@ export function useRevealMark(container: RefObject<HTMLElement | null>, key: str
   useEffect(() => {
     const host = container.current;
     if (!host || key === null) return;
-    function reveal(): boolean {
-      const mark = host!.querySelector<HTMLElement>(".evidence-match");
-      if (!mark) return false;
-      const offset = mark.getBoundingClientRect().top - host!.getBoundingClientRect().top + host!.scrollTop;
-      host!.scrollTo({ top: Math.max(0, offset - host!.clientHeight / 3) });
-      return true;
+    function reveal() {
+      const marks = [...host!.querySelectorAll<HTMLElement>(".evidence-match")].map((mark) => mark.getBoundingClientRect());
+      if (marks.length === 0) return;
+      const origin = host!.getBoundingClientRect().top - host!.scrollTop;
+      const top = Math.min(...marks.map((rect) => rect.top)) - origin;
+      const bottom = Math.max(...marks.map((rect) => rect.bottom)) - origin;
+      // All the marks in the middle of the view when they fit in it, the first a third of the way down when not.
+      const target = bottom - top < host!.clientHeight * 0.8 ? (top + bottom) / 2 - host!.clientHeight / 2 : top - host!.clientHeight / 3;
+      host!.scrollTo({ top: Math.max(0, target) });
     }
-    if (reveal()) return;
-    const observer = new MutationObserver(() => { if (reveal()) observer.disconnect(); });
-    observer.observe(host, { subtree: true, childList: true, attributes: true, attributeFilter: ["class"] });
-    const timeout = window.setTimeout(() => observer.disconnect(), 10_000);
+    // The page and its marks settle over a few renders, so the view follows them until the reader moves it.
+    reveal();
+    const observer = new MutationObserver(() => { reveal(); });
+    observer.observe(host, { subtree: true, childList: true, attributes: true, attributeFilter: ["class", "style"] });
+    const stop = () => observer.disconnect();
+    const timeout = window.setTimeout(stop, 4000);
+    host.addEventListener("wheel", stop, { once: true, passive: true });
+    host.addEventListener("touchstart", stop, { once: true, passive: true });
+    host.addEventListener("pointerdown", stop, { once: true });
+    host.addEventListener("keydown", stop, { once: true });
     return () => {
-      observer.disconnect();
+      stop();
       window.clearTimeout(timeout);
+      host.removeEventListener("wheel", stop);
+      host.removeEventListener("touchstart", stop);
+      host.removeEventListener("pointerdown", stop);
+      host.removeEventListener("keydown", stop);
     };
   }, [container, key]);
 }

@@ -1,0 +1,4 @@
+[
+  { "query": "Krankmeldungen vom Oktober 2025", "expected": [37, 32, 28, 29, 30], "answer": false },
+  { "query": "Wie viel habe ich im Februar 2026 verdient?", "expected": [48], "answer": true }
+]

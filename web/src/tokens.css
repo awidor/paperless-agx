@@ -30,11 +30,15 @@
 
   /* app screen */
   --gutter: 40px; --bar-height: 64px; --control-h: 40px; --control-h-sm: 32px; --thumb-mini: 44px; --thumb-ledger: 32px; --radius-groove: 10px; --radius-sheet: 2px;
+  /* The search column and the field above it: as wide as the bar leaves room for with the wordmark and actions beside it, up to 56rem. */
+  --bar-side: 10rem;
+  --column-search: max(40rem, min(56rem, 100cqi - 2 * (var(--gutter) + var(--bar-side) + var(--space-lg))));
+  --measure-answer: 40rem; --paper-crop: 20rem; --paper-crop-stacked: 26rem;
   --color-well: oklch(91.5% 0.009 55);
   --cast-sheet: 9px 8px 16px -9px oklch(var(--shade) / 0.36);
   --color-sheet: var(--color-cotton); --color-sheet-ink: var(--color-print); --color-sheet-muted: oklch(45% 0.012 45);
-  --color-mark: oklch(80% 0.11 32 / 0.42); --color-mark-text: oklch(86% 0.08 32 / 0.7);
-  --selection-fill: var(--color-accent-2); --selection-opacity: 0.24;
+  --color-mark-fill: oklch(80% 0.11 32 / 0.3); --color-mark-edge: oklch(57% 0.17 29); --color-mark-text: oklch(86% 0.08 32 / 0.7);
+  --selection-fill: var(--color-accent-2); --selection-opacity: 0.24; --mark-blend: multiply;
   --document-filter: none;
   --color-overlay: oklch(94.3% 0.008 64 / 0.9); --color-backdrop: oklch(20% 0.01 40 / 0.35);
 }
@@ -51,9 +55,10 @@
   --color-board: oklch(91% 0.008 70); --color-board-type: oklch(19% 0.01 40); --color-paid: oklch(72% 0.12 33);
   --color-error: oklch(72% 0.15 27); --color-success: oklch(74% 0.11 150);
   --color-sheet: oklch(21.6% 0 0); --color-sheet-ink: oklch(86% 0.004 70); --color-sheet-muted: oklch(68% 0.006 60);
-  --color-mark: oklch(62% 0.12 32 / 0.42); --color-mark-text: oklch(52% 0.1 32 / 0.55);
-  --selection-opacity: 0.38;
-  --document-filter: invert(0.9) hue-rotate(180deg);
+  --color-mark-fill: oklch(62% 0.12 32 / 0.3); --color-mark-edge: oklch(72% 0.14 30); --color-mark-text: oklch(52% 0.1 32 / 0.55);
+  --selection-opacity: 0.38; --mark-blend: screen;
+  /* Inverted with a ceiling: white paper lands on the sheet's tone, and solid black fields end mid-grey instead of glaring white. */
+  --document-filter: invert(0.86) hue-rotate(180deg) brightness(0.7);
   --color-overlay: oklch(14.5% 0.007 55 / 0.9); --color-backdrop: oklch(5% 0.005 40 / 0.6);
   --tex-cotton: none; --tex-desk: none;
   --shadow-card: none;

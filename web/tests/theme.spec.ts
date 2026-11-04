@@ -3,7 +3,7 @@ import { pageImage, sampleDocuments, samplePage, samplePdf } from "./fixtures/do
 
 const url = "http://127.0.0.1:5173";
 const sampleDocument = sampleDocuments[0];
-const darkFilter = "invert(0.9) hue-rotate(180deg)";
+const darkFilter = "invert(0.86) hue-rotate(180deg) brightness(0.7)";
 
 /** The computed value of a colour token, resolved the way the browser paints it. */
 async function token(page: Page, name: string): Promise<string> {
@@ -145,13 +145,14 @@ test("PDF pages are dark while text selection and original file downloads remain
   await expect(page.locator(".pdf-canvas")).toHaveCSS("filter", "none");
 });
 
-test("search evidence and thumbnails also use dark document colors", async ({ page }, testInfo) => {
+test("search evidence strips and the page they open use dark document colors", async ({ page }, testInfo) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto(`${url}/?q=statement`);
-  await expect(page.locator(".result .sheet--mini img").first()).toHaveCSS("filter", darkFilter);
-  await expect(page.locator(".evidence__desk .image-page-frame > img")).toHaveCSS("filter", darkFilter);
+  await expect(page.locator(".source .paper .doc-image").first()).toHaveCSS("filter", darkFilter);
   await page.evaluate(() => document.fonts.ready);
   await page.screenshot({ path: testInfo.outputPath("dark-search.png"), fullPage: false });
+  await page.getByRole("button", { name: /^Open .* at page 1$/ }).first().click();
+  await expect(page.locator(".reader .image-page-frame > img, .reader .pdf-canvas").first()).toHaveCSS("filter", darkFilter);
 });
 
 test("theme selector remains keyboard accessible at mobile widths", async ({ page }, testInfo) => {

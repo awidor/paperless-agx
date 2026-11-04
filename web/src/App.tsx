@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 import {
   getHealth,
@@ -23,7 +23,7 @@ type UrlState = {
   query: LibraryQuery;
   search: string;
   view: View;
-  selected: { id: number; page: number; highlight?: string; highlightPage?: number } | null;
+  selected: { id: number; page: number; marks?: string[]; marksPage?: number } | null;
 };
 
 const SORTS = new Set<DocumentSort>([
@@ -204,8 +204,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const terms = useMemo(() => activeSearch.split(/\s+/).filter((term) => term.length >= 3), [activeSearch]);
-
   function checkpointHistory() {
     window.history.pushState(null, "", window.location.href);
   }
@@ -293,11 +291,11 @@ export default function App() {
     window.scrollTo({ top: 0 });
   }
 
-  function openDocument(document: Document, page = 1, highlight?: string) {
+  function openDocument(document: Document, page = 1, marks?: string[]) {
     checkpointHistory();
     openedFromUi.current = true;
     detailDirty.current = false;
-    setSelected({ id: document.document_id, page, highlight, highlightPage: highlight ? page : undefined });
+    setSelected({ id: document.document_id, page, marks, marksPage: marks?.length ? page : undefined });
   }
 
   function closeDocument() {
@@ -352,7 +350,6 @@ export default function App() {
               key={activeSearch}
               query={activeSearch}
               state={search}
-              terms={terms}
               hasFilters={activeFilterCount(query, false) > 0}
               toolbar={<FilterToggle open={filtersOpen} count={activeFilterCount(query, false)} onToggle={() => setFiltersOpen((open) => !open)} />}
               filters={<FilterBar query={query} senders={senders} open={filtersOpen || activeFilterCount(query, false) > 0} withSort={false} onChange={updateQuery} />}
@@ -393,8 +390,8 @@ export default function App() {
       {selected && <Reader
         documentId={selected.id}
         initialPage={selected.page}
-        highlight={selected.highlight}
-        highlightPage={selected.highlightPage}
+        marks={selected.marks}
+        marksPage={selected.marksPage}
         senders={senders}
         onPageChange={(page) => setSelected((value) => value ? { ...value, page } : value)}
         onDirtyChange={(dirty) => { detailDirty.current = dirty; }}

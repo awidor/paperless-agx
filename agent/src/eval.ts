@@ -4,8 +4,10 @@
  *   bun src/eval.ts <queries.json> [--model id] [--reasoning level] [--providers a,b]
  *                   [--concurrency 4] [--json out.json]
  *
- * queries.json: [{ "query": "...", "expected": [document ids that should be found] }]
+ * queries.json: [{ "query": "...", "expected": [document ids that should be found], "answer": true | false }]
  * A query scores the share of its expected documents that appear in the top 5.
+ * "answer" is optional: true when the query asks for a fact the agent should
+ * answer, false when it asks for documents and the answer must stay empty.
  * --json writes every query's results and answer, for comparing runs side by side.
  */
 import { parseArgs } from "node:util";
@@ -14,13 +16,15 @@ import { runAgentSearch } from "./agent.ts";
 import { loadConfig } from "./config.ts";
 import { createRuntime } from "./runtime.ts";
 
-type Case = { query: string; expected: number[] };
+type Case = { query: string; expected: number[]; answer?: boolean };
 type Score = {
   query: string;
   expected: number[];
   found: number[];
   answer: string | null;
   recall: number | null;
+  /** Whether the agent answered exactly when the case says it should; null when the case does not say. */
+  answered: boolean | null;
   seconds: number;
   cost: number;
   turns: number;
@@ -68,6 +72,7 @@ async function score(item: Case): Promise<Score> {
       found,
       answer: run.result.answer ?? null,
       recall: recall(found, item.expected),
+      answered: item.answer === undefined ? null : item.answer === Boolean(run.result.answer),
       seconds: (performance.now() - started) / 1000,
       cost: run.costUsd,
       turns: run.turns,
@@ -75,7 +80,7 @@ async function score(item: Case): Promise<Score> {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { ...base, found: [], answer: null, recall: null, seconds: (performance.now() - started) / 1000, cost: 0, turns: 0, providers: [], error: message };
+    return { ...base, found: [], answer: null, recall: null, answered: null, seconds: (performance.now() - started) / 1000, cost: 0, turns: 0, providers: [], error: message };
   }
 }
 
@@ -96,11 +101,12 @@ function percent(value: number | null): string {
 const model = values.model ?? config.model.id;
 const reasoning = runtime.reasoning;
 console.log(`model ${model} on ${reasoning} · recall in the top ${TOP}\n`);
-console.log("recall  seconds   cost     query");
+console.log("recall  answer  seconds   cost     query");
 for (const item of scores) {
   const failure = item.error ? `  (${item.error})` : "";
   const cost = `$${item.cost.toFixed(4)}`;
-  console.log(`${percent(item.recall).padEnd(8)}${item.seconds.toFixed(1).padStart(7)}  ${cost.padStart(8)}  ${item.query}${failure}`);
+  const answered = item.answered === null ? "-" : item.answered ? "ok" : "wrong";
+  console.log(`${percent(item.recall).padEnd(8)}${answered.padEnd(8)}${item.seconds.toFixed(1).padStart(7)}  ${cost.padStart(8)}  ${item.query}${failure}`);
 }
 const recalls = scores.map((item) => item.recall ?? 0);
 const durations = scores.map((item) => item.seconds).sort((left, right) => left - right);
@@ -110,5 +116,7 @@ const failed = scores.filter((item) => item.error).length;
 const mean = recalls.reduce((total, value) => total + value, 0) / Math.max(recalls.length, 1);
 const providers = [...new Set(scores.flatMap((item) => item.providers))].join(", ") || "unknown";
 console.log(`\nrecall ${percent(mean)} · median ${median.toFixed(1)} s · cost $${cost.toFixed(4)} ($${(cost / Math.max(scores.length, 1)).toFixed(4)} per search) · ${failed} failed`);
+const judged = scores.filter((item) => item.answered !== null);
+if (judged.length > 0) console.log(`answered when it should ${judged.filter((item) => item.answered).length} of ${judged.length}`);
 console.log(`served by ${providers}`);
 if (values.json) await Bun.write(values.json, JSON.stringify({ model, reasoning, scores }, null, 2));

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { OcrBlock } from "./api";
-import { matchesEvidence } from "./evidenceHighlight";
+import { EvidenceMarks } from "./EvidenceMarks";
+import { markBoxes } from "./evidenceHighlight";
 import { bindPageTextSelection } from "./pageTextSelection";
 
 const LINE_HEIGHT = 1.15;
@@ -53,7 +54,9 @@ function fontSize(block: OcrBlock, boxWidth: number, boxHeight: number): number 
   return fitFontSize(block.text, block.bbox, boxWidth, boxHeight);
 }
 
-export function OcrTextLayer({ blocks, highlight }: { blocks: OcrBlock[]; highlight?: string }) {
+export function OcrTextLayer({ blocks, marks }: { blocks: OcrBlock[]; marks?: string[] }) {
+  // Only line-sized blocks are outlined; a block that is a whole form points at nothing.
+  const evidence = useMemo(() => markBoxes(blocks.map((block) => ({ text: block.text, box: [block.bbox[0] / 1000, block.bbox[1] / 1000, block.bbox[2] / 1000, block.bbox[3] / 1000] })), marks).flat(), [blocks, marks]);
   const layerRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState<{ width: number; height: number } | null>(null);
 
@@ -81,9 +84,10 @@ export function OcrTextLayer({ blocks, highlight }: { blocks: OcrBlock[]; highli
 
   return (
     <div className="ocr-text-layer" ref={layerRef} aria-label="Selectable OCR text">
+      {evidence.length > 0 && <div className="page-marks" aria-hidden="true"><EvidenceMarks boxes={evidence} /></div>}
       {box && blocks.map((block, index) => (
         <span
-          className={`ocr-positioned-block${matchesEvidence(block.text, highlight) ? " evidence-match" : ""}`}
+          className="ocr-positioned-block"
           data-label={block.label}
           key={`${block.bbox.join("-")}-${index}`}
           style={{

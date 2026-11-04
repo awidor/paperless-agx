@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type * as PdfjsModule from "pdfjs-dist";
-import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask, TextLayer } from "pdfjs-dist";
+import type { PageViewport, PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask, TextLayer } from "pdfjs-dist";
+import type { TextContent } from "pdfjs-dist/types/src/display/api";
 import type { OcrBlock } from "./api";
-import { matchesEvidence } from "./evidenceHighlight";
+import { EvidenceMarks } from "./EvidenceMarks";
+import { markBoxes, type Box, type Run } from "./evidenceHighlight";
 import { OcrTextLayer } from "./OcrTextLayer";
 import { bindPageTextSelection } from "./pageTextSelection";
 
 let pdfjs: Promise<typeof PdfjsModule> | undefined;
 
-function loadPdfjs(): Promise<typeof PdfjsModule> {
+export function loadPdfjs(): Promise<typeof PdfjsModule> {
   pdfjs ??= import("pdfjs-dist").then((module) => {
     module.GlobalWorkerOptions.workerSrc = workerUrl;
     return module;
@@ -17,7 +19,20 @@ function loadPdfjs(): Promise<typeof PdfjsModule> {
   return pdfjs;
 }
 
-export function PdfViewer({ url, page, blocks, highlight }: { url: string; page: number; blocks: OcrBlock[]; highlight?: string }) {
+/** The text runs of a page with their boxes as fractions of the page, from the ascender to the descender. */
+export function textRuns(module: typeof PdfjsModule, viewport: PageViewport, content: TextContent): Run[] {
+  const runs: Run[] = [];
+  for (const item of content.items) {
+    if (!("str" in item) || !item.str.trim()) continue;
+    const [, , c, d, e, f] = module.Util.transform(viewport.transform, item.transform);
+    const size = Math.hypot(c, d);
+    const width = item.width * viewport.scale;
+    runs.push({ text: item.str, box: [e / viewport.width, (f - size * 0.85) / viewport.height, (e + width) / viewport.width, (f + size * 0.2) / viewport.height] });
+  }
+  return runs;
+}
+
+export function PdfViewer({ url, page, blocks, marks }: { url: string; page: number; blocks: OcrBlock[]; marks?: string[] }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
@@ -26,6 +41,7 @@ export function PdfViewer({ url, page, blocks, highlight }: { url: string; page:
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
   const [available, setAvailable] = useState(0);
   const [embeddedText, setEmbeddedText] = useState(false);
+  const [evidence, setEvidence] = useState<Box[]>([]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -91,6 +107,7 @@ export function PdfViewer({ url, page, blocks, highlight }: { url: string; page:
       const container = textLayerRef.current;
       if (cancelled || !container) return;
       container.replaceChildren();
+      setEvidence(markBoxes(textRuns(module, viewport, textContent), marks).flat());
       const hasText = textContent.items.some((item) => "str" in item && item.str.trim() !== "");
       setEmbeddedText(hasText);
       if (!hasText) return;
@@ -98,9 +115,6 @@ export function PdfViewer({ url, page, blocks, highlight }: { url: string; page:
       textLayer = new module.TextLayer({ textContentSource: textContent, container, viewport });
       await textLayer.render();
       if (cancelled) return;
-      for (const span of container.querySelectorAll<HTMLElement>("span")) {
-        span.classList.toggle("evidence-match", matchesEvidence(span.textContent ?? "", highlight));
-      }
       unbind = bindPageTextSelection(container);
     })().catch((cause) => !cancelled && setError(cause instanceof Error ? cause.message : "The PDF page failed to render."));
     return () => {
@@ -109,7 +123,7 @@ export function PdfViewer({ url, page, blocks, highlight }: { url: string; page:
       renderTask?.cancel();
       textLayer?.cancel();
     };
-  }, [pdf, page, available, highlight]);
+  }, [pdf, page, available, marks]);
 
   return (
     <div className="pdf-viewer" ref={hostRef}>
@@ -118,8 +132,9 @@ export function PdfViewer({ url, page, blocks, highlight }: { url: string; page:
       ) : (
         <div className="ocr-page-frame pdf-page-frame" style={size ?? undefined}>
           <canvas ref={canvasRef} className="pdf-canvas" aria-label={`PDF page ${page}`} />
+          {embeddedText && evidence.length > 0 && <div className="page-marks" aria-hidden="true"><EvidenceMarks boxes={evidence} /></div>}
           <div className="text-layer" ref={textLayerRef} aria-label="Selectable page text" />
-          {!embeddedText && <OcrTextLayer blocks={blocks} highlight={highlight} />}
+          {!embeddedText && <OcrTextLayer blocks={blocks} marks={marks} />}
         </div>
       )}
     </div>

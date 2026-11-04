@@ -177,10 +177,32 @@ function progressFor(tool: string, args: any, context: RunContext): AgentProgres
   return { kind: "thinking", label: "Ranking the results" };
 }
 
-function dateRange(from?: string | null, to?: string | null): string | null {
-  if (from && to) return `between ${from} and ${to}`;
-  if (from) return `since ${from}`;
-  if (to) return `until ${to}`;
+const dayFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" });
+const monthFormat = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+
+/** A date the agent passed, as a day, or null when it is not one. */
+function parseDay(value: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  return match ? new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))) : null;
+}
+
+/** A date filter the way a person says it: "in October 2025", "in 2025", "from Oct 3, 2025 to Oct 17, 2025". */
+export function dateRange(from?: string | null, to?: string | null): string | null {
+  const start = from ? parseDay(from) : null;
+  const end = to ? parseDay(to) : null;
+  const day = (date: Date | null, raw: string) => (date ? dayFormat.format(date) : raw);
+  if (from && to) {
+    if (start && end) {
+      const monthEnd = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0));
+      if (start.getUTCDate() === 1 && end.getTime() === monthEnd.getTime()) return `in ${monthFormat.format(start)}`;
+      const yearStart = start.getUTCMonth() === 0 && start.getUTCDate() === 1;
+      const yearEnd = end.getUTCMonth() === 11 && end.getUTCDate() === 31;
+      if (yearStart && yearEnd && start.getUTCFullYear() === end.getUTCFullYear()) return `in ${start.getUTCFullYear()}`;
+    }
+    return `from ${day(start, from)} to ${day(end, to)}`;
+  }
+  if (from) return `since ${day(start, from)}`;
+  if (to) return `until ${day(end, to)}`;
   return null;
 }
 
