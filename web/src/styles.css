@@ -369,11 +369,27 @@ mark { padding: 0 var(--space-3xs); border-radius: 2px; background: var(--color-
 
 /* ---------- uploads ---------- */
 
-.tray { position: fixed; right: var(--space-lg); bottom: var(--space-lg); z-index: var(--z-toast); display: grid; gap: var(--space-xs); width: min(22rem, calc(100% - 2 * var(--space-md))); padding: var(--space-md); border-radius: var(--radius-card); box-shadow: var(--edge-stock), var(--cast-stock-lift); }
+/* The scan and upload trays stack in the corner when both are showing. */
+.trays { position: fixed; right: var(--space-lg); bottom: var(--space-lg); z-index: var(--z-toast); display: grid; gap: var(--space-sm); width: min(22rem, calc(100vw - 2 * var(--space-md))); pointer-events: none; }
+.tray { display: grid; gap: var(--space-xs); padding: var(--space-md); border-radius: var(--radius-card); box-shadow: var(--edge-stock), var(--cast-stock-lift); pointer-events: auto; }
 .tray__head { display: flex; align-items: center; gap: var(--space-xs); }
 .tray__title { flex: 1; font-weight: 600; }
 .tray__file { overflow: hidden; color: var(--color-muted); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
 .tray__lines { display: grid; gap: var(--space-2xs); margin: 0; padding: 0; color: var(--color-ink-2); font-size: var(--text-sm); list-style: none; }
+.tray__actions { display: flex; justify-content: flex-end; margin: calc(-1 * var(--space-xs)) calc(-1 * var(--space-xs)) calc(-1 * var(--space-xs)) 0; }
+.tray__actions .btn--text { height: var(--control-h-sm); }
+
+/* ---------- scanning ---------- */
+
+.scan-dialog { width: min(27rem, calc(100vw - 2 * var(--space-md))); max-height: calc(100dvh - 2 * var(--space-md)); padding: var(--space-lg); border: 0; border-radius: var(--radius-card); box-shadow: var(--edge-stock), var(--cast-stock-lift); }
+.scan-dialog::backdrop { background: var(--color-backdrop); }
+.scan-dialog form { display: grid; gap: var(--space-lg); }
+.scan-dialog__title { font-size: var(--text-lg); }
+.scan-dialog__lead { margin-top: var(--space-3xs); color: var(--color-muted); font-size: var(--text-sm); }
+.scan-dialog__group { display: grid; gap: var(--space-xs); }
+.scan-dialog__hint { color: var(--color-muted); font-size: var(--text-xs); }
+.scan-dialog .groove { width: fit-content; max-width: 100%; }
+.scan-dialog__actions { display: flex; justify-content: flex-end; gap: var(--space-xs); padding-top: var(--space-xs); }
 
 .drop { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; background: var(--color-overlay); pointer-events: none; }
 .drop__sheet { display: grid; place-items: center; align-content: center; gap: var(--space-md); width: min(18rem, 70%); aspect-ratio: 210 / 297; border: 2px dashed var(--color-ink-2); border-radius: var(--radius-card); background-color: var(--color-cotton); color: var(--color-ink); font-size: var(--text-lg); font-weight: 600; text-align: center; box-shadow: var(--cast-stock-lift); transform: rotate(-2deg); }
@@ -471,6 +487,7 @@ mark { padding: 0 var(--space-3xs); border-radius: 2px; background: var(--color-
 
 .tray { transform-origin: bottom right; animation: tray-in var(--dur-short) var(--ease-out) backwards; }
 .tray.is-leaving { animation: tray-out var(--dur-micro) var(--ease-in) forwards; pointer-events: none; }
+.scan-dialog[open] { animation: settle var(--dur-short) var(--ease-out) backwards; }
 .drop { animation: fade var(--dur-micro) var(--ease-out) backwards; }
 .drop__sheet { animation: lift var(--dur-short) var(--ease-out) backwards; }
 
@@ -480,6 +497,7 @@ mark { padding: 0 var(--space-3xs); border-radius: 2px; background: var(--color-
 @media (prefers-reduced-motion: reduce) {
   .shelf .sheet-grid > li, .ledger__row, .results .source { animation-delay: 0s; }
   .stage .meter, .tray .meter { animation: none; background-image: none; }
+  .scan-dialog[open] { animation: none; }
 }
 
 /* ---------- smaller screens ---------- */

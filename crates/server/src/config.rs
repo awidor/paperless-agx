@@ -22,6 +22,19 @@ pub struct AgentConfig {
     pub url: Url,
 }
 
+/// The network scanner behind `/api/scan`: a Samsung SL-M3870FW, or another MFP speaking its
+/// protocol on TCP port 9400.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScannerConfig {
+    pub host: String,
+    #[serde(default = "default_scanner_port")]
+    pub port: u16,
+}
+
+const fn default_scanner_port() -> u16 {
+    paperless_scanner::DEFAULT_PORT
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub data_dir: PathBuf,
@@ -33,6 +46,8 @@ pub struct AppConfig {
     pub embeddings: Option<EmbeddingConfig>,
     #[serde(default)]
     pub agent: Option<AgentConfig>,
+    #[serde(default)]
+    pub scanner: Option<ScannerConfig>,
     pub llm: LlmConfig,
     pub ocr: OcrConfig,
 }
@@ -69,6 +84,13 @@ impl AppConfig {
                 bail!("embedding max_concurrency must be greater than zero");
             }
         }
+        if self
+            .scanner
+            .as_ref()
+            .is_some_and(|scanner| scanner.host.trim().is_empty())
+        {
+            bail!("scanner.host must not be empty");
+        }
         Ok(())
     }
 }
@@ -98,6 +120,9 @@ max_concurrency = 2
 
 [agent]
 url = "http://paperless-agent:3100"
+
+[scanner]
+host = "192.168.1.218"
 
 [ocr]
 base_url = "http://127.0.0.1:8765/v1"
@@ -135,6 +160,11 @@ max_concurrency = 1
         assert_eq!(
             config.agent.as_ref().unwrap().url.as_str(),
             "http://paperless-agent:3100/"
+        );
+        let scanner = config.scanner.as_ref().unwrap();
+        assert_eq!(
+            (scanner.host.as_str(), scanner.port),
+            ("192.168.1.218", 9400)
         );
         assert_eq!(config.ocr.pages_per_request, 2);
         assert_eq!(config.ocr.model, "surya");

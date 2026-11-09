@@ -1274,6 +1274,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "paperless-scanner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "image",
+ "paperless-models",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "paperless-search"
 version = "0.1.0"
 dependencies = [
@@ -1297,6 +1310,7 @@ dependencies = [
  "paperless-ingest",
  "paperless-models",
  "paperless-ocr-client",
+ "paperless-scanner",
  "paperless-search",
  "paperless-storage",
  "reqwest",

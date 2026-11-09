@@ -27,7 +27,7 @@ use tower_http::{
 };
 use tracing::{error, info, warn};
 
-pub use config::{AgentConfig, AppConfig, EmbeddingConfig};
+pub use config::{AgentConfig, AppConfig, EmbeddingConfig, ScannerConfig};
 pub use routes::AppError;
 
 #[derive(Clone)]
@@ -46,6 +46,9 @@ pub struct AppState {
     pub ocr: OcrClient,
     pub agent: Option<routes::AgentProxy>,
     pub upload_commit: Arc<Mutex<()>>,
+    pub scanner: Option<paperless_scanner::Scanner>,
+    /// Held for the length of a scan: the printer scans one stack at a time.
+    pub scan_running: Arc<Mutex<()>>,
 }
 
 pub async fn build_app(config: AppConfig) -> Result<Router> {
@@ -171,6 +174,11 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         ocr,
         agent,
         upload_commit: Arc::new(Mutex::new(())),
+        scanner: config
+            .scanner
+            .as_ref()
+            .map(|scanner| paperless_scanner::Scanner::new(&scanner.host, scanner.port)),
+        scan_running: Arc::new(Mutex::new(())),
     };
 
     Ok(Router::new()
@@ -202,6 +210,7 @@ pub async fn build_app(config: AppConfig) -> Result<Router> {
         )
         .route("/api/search", post(routes::search))
         .route("/api/search/agent", post(routes::agent_search))
+        .route("/api/scan", post(routes::scan))
         .route("/api/senders", get(routes::senders))
         .route("/api/openapi.json", get(routes::openapi))
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))

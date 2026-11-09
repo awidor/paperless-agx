@@ -365,6 +365,52 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
+/// Where the scanner takes the paper from. `Auto` uses the feeder when paper is in it, else the glass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanSource {
+    #[default]
+    Auto,
+    Feeder,
+    Glass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanMode {
+    Color,
+    #[default]
+    Gray,
+    BlackWhite,
+}
+
+/// A scan from the configured printer; every page scanned becomes one PDF document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanRequest {
+    #[serde(default)]
+    pub source: ScanSource,
+    #[serde(default)]
+    pub mode: ScanMode,
+    #[serde(default = "default_scan_dpi")]
+    pub dpi: u16,
+}
+
+const fn default_scan_dpi() -> u16 {
+    300
+}
+
+/// Sent after each page the scanner finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanProgress {
+    pub pages: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanResult {
+    pub document: Document,
+    pub pages: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: &'static str,
@@ -375,6 +421,7 @@ pub struct HealthResponse {
     pub embedding_configured: bool,
     pub embedding_model: String,
     pub agent_configured: bool,
+    pub scanner_configured: bool,
 }
 
 #[cfg(test)]

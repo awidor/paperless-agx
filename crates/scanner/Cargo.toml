@@ -1,0 +1,25 @@
+[package]
+name = "paperless-scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# An in-process scanner speaking the same protocol, for tests in other crates.
+fake = []
+
+[dependencies]
+flate2 = "1.1.9"
+image.workspace = true
+paperless-models = { path = "../models" }
+tokio = { workspace = true, features = ["net"] }
+tracing.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros"] }
+
+[[example]]
+name = "scan"

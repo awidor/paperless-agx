@@ -6,6 +6,7 @@ members = [
     "crates/search",
     "crates/ocr-client",
     "crates/ingest",
+    "crates/scanner",
     "crates/server",
 ]
 resolver = "2"

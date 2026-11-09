@@ -1,6 +1,7 @@
 import type { FormEvent, RefObject } from "react";
 import { Search, TriangleAlert, Upload, X } from "lucide-react";
-import type { HealthResponse } from "./api";
+import type { HealthResponse, ScanRequest } from "./api";
+import { ScanControl } from "./Scan";
 import { ThemeControl } from "./ThemeControl";
 import { Spinner } from "./ui";
 
@@ -18,18 +19,20 @@ function HealthNotice({ health }: { health: HealthResponse | null }) {
   </p>;
 }
 
-export function TopBar({ inputRef, text, searching, busy, uploading, health, onText, onSubmit, onClear, onHome, onUpload }: {
+export function TopBar({ inputRef, text, searching, busy, uploading, scanning, health, onText, onSubmit, onClear, onHome, onUpload, onScan }: {
   inputRef: RefObject<HTMLInputElement | null>;
   text: string;
   searching: boolean;
   busy: boolean;
   uploading: boolean;
+  scanning: boolean;
   health: HealthResponse | null;
   onText: (text: string) => void;
   onSubmit: (event: FormEvent) => void;
   onClear: () => void;
   onHome: () => void;
   onUpload: () => void;
+  onScan: (settings: ScanRequest) => void;
 }) {
   return <header className="bar">
     <div className="container bar__inner">
@@ -55,6 +58,7 @@ export function TopBar({ inputRef, text, searching, busy, uploading, health, onT
       <div className="bar__actions">
         <HealthNotice health={health} />
         <ThemeControl />
+        {health?.scanner_configured && <ScanControl scanning={scanning} onScan={onScan} />}
         <button type="button" className="btn btn--ink" disabled={uploading} aria-busy={uploading} onClick={onUpload}>
           {uploading ? <Spinner /> : <Upload size={16} aria-hidden="true" />}
           <span className="btn__label">{uploading ? "Uploading" : "Upload"}</span>

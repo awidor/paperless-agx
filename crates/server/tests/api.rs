@@ -11,7 +11,8 @@ use http_body_util::BodyExt;
 use image::{DynamicImage, ImageFormat};
 use paperless_models::{Document, IngestionStatus, MediaType};
 use paperless_ocr_client::{LlmConfig, OcrConfig};
-use paperless_server::{AgentConfig, AppConfig, EmbeddingConfig, build_app};
+use paperless_scanner::fake::{FakeScanner, FakeSetup};
+use paperless_server::{AgentConfig, AppConfig, EmbeddingConfig, ScannerConfig, build_app};
 use paperless_storage::{DataLayout, DocumentRepository, ObjectStore};
 use tower::ServiceExt;
 use url::Url;
@@ -25,6 +26,7 @@ fn config(data_dir: &Path, base_url: Url) -> AppConfig {
         eager_thumbnail_pages: 3,
         embeddings: None,
         agent: None,
+        scanner: None,
         llm: LlmConfig {
             base_url: base_url.clone(),
             model: "z-ai/glm-5.3-flash".into(),
@@ -782,6 +784,107 @@ async fn pdf_upload_generates_pages_and_thumbnail() {
     let ready = wait_for_ocr(&app, uploaded.document_id).await;
     assert_eq!(ready.media_type, MediaType::Pdf);
     assert_eq!(ready.page_count, 1);
+}
+
+async fn post_scan(app: &Router, request: serde_json::Value) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/scan")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// The data of the stream's last event, which must be `event`.
+fn last_event(stream: &str, event: &str) -> serde_json::Value {
+    let block = stream.trim_end().rsplit("\n\n").next().unwrap();
+    let (name, data) = block.split_once('\n').unwrap();
+    assert_eq!(name, format!("event: {event}"), "stream: {stream}");
+    serde_json::from_str(data.strip_prefix("data: ").unwrap()).unwrap()
+}
+
+async fn app_with_scanner(data_dir: &Path, setup: FakeSetup) -> (Router, FakeScanner) {
+    let fake = FakeScanner::start(setup).await;
+    let mut settings = config(data_dir, start_ocr().await);
+    settings.scanner = Some(ScannerConfig {
+        host: "127.0.0.1".into(),
+        port: fake.port(),
+    });
+    (build_app(settings).await.unwrap(), fake)
+}
+
+#[tokio::test]
+async fn scan_streams_progress_and_adds_the_stack_as_one_pdf() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (app, _fake) = app_with_scanner(
+        temporary.path(),
+        FakeSetup {
+            feeder_sheets: 2,
+            ..FakeSetup::default()
+        },
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let health: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(health["scanner_configured"], true);
+
+    let (status, stream) = post_scan(
+        &app,
+        serde_json::json!({"source": "feeder", "mode": "gray", "dpi": 150}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        stream.starts_with(
+            "event: progress\ndata: {\"pages\":1}\n\nevent: progress\ndata: {\"pages\":2}\n\n"
+        ),
+        "{stream}"
+    );
+    let result = last_event(&stream, "result");
+    assert_eq!(result["pages"], 2);
+    let document_id = result["document"]["document_id"].as_u64().unwrap();
+    let document = wait_for_ocr(&app, document_id).await;
+    assert_eq!(document.media_type, MediaType::Pdf);
+    assert_eq!(document.page_count, 2);
+    assert!(document.filename.starts_with("Scan ") && document.filename.ends_with(".pdf"));
+}
+
+#[tokio::test]
+async fn scan_reports_scanner_problems_and_rejects_bad_requests() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (app, _fake) = app_with_scanner(temporary.path(), FakeSetup::default()).await;
+
+    let (status, stream) = post_scan(&app, serde_json::json!({"source": "feeder"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        last_event(&stream, "error")["message"],
+        "There is no paper in the feeder."
+    );
+
+    let (status, _) = post_scan(&app, serde_json::json!({"dpi": 1200})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let unconfigured = build_app(config(
+        temporary.path().join("other").as_path(),
+        start_ocr().await,
+    ))
+    .await
+    .unwrap();
+    let (status, _) = post_scan(&unconfigured, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 fn one_page_pdf() -> Vec<u8> {

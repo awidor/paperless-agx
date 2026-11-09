@@ -35,6 +35,14 @@ PAPERLESS_AGENT_CONFIG=../config/paperless-agent.local.toml bun run start
 - Every document gets a short AI summary when it is indexed, and the summary is searchable too. Documents indexed before summaries existed are summarized at the next start.
 - Score the agent on your own queries with `bun run eval <queries.json>` in `agent/`. The file is a list of `{"query": "...", "expected": [document ids], "answer": true, "facts": ["regex"]}`: `answer` says whether the query should get an answer, and `facts` lists patterns the answer must contain. `--model`, `--reasoning` and `--providers` try another OpenRouter model, and `--repeat` runs each query several times.
 
+## Scanning
+
+- The Scan button in the top bar scans from the Samsung SL-M3870FW at `192.168.1.218`, set in `[scanner]`; without that section there is no button. Choose the feeder, the glass, or Auto (the feeder when paper is in it); gray, color, or black and white; and 150, 300 or 600 dpi. Every sheet scanned becomes one A4 PDF, which is then read like an upload. A 300 dpi page takes about 11 seconds.
+- The printer speaks SANE's `xerox_mfp` protocol on TCP port 9400 (`crates/scanner`). Paperless always asks for color JPEG, the one transfer its network firmware gets right, and makes gray and black and white itself; the crate's protocol notes say why.
+- A scan runs to the end even if the page is closed, and one scan runs at a time.
+- Give the printer a fixed address on the router: Docker containers cannot resolve its `.local` name.
+- Check the scanner without the server: `cargo run -p paperless-scanner --example scan -- info`, or `-- scan --source feeder -o scan.pdf`.
+
 - Open http://127.0.0.1:3000.
 - Local use: no built-in authentication.
 - Documents stay in `data/`; extracted text, search queries, and the text the agent reads are sent to OpenRouter, restricted to zero-data-retention providers.

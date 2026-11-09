@@ -16,6 +16,10 @@ export type AgentSearchRequest = components["schemas"]["AgentSearchRequest"];
 export type AgentProgress = components["schemas"]["AgentProgress"];
 export type AgentResultItem = components["schemas"]["AgentResultItem"];
 export type AgentSearchResult = components["schemas"]["AgentSearchResult"];
+export type ScanSource = components["schemas"]["ScanSource"];
+export type ScanMode = components["schemas"]["ScanMode"];
+export type ScanRequest = Required<components["schemas"]["ScanRequest"]>;
+export type ScanResult = components["schemas"]["ScanResult"];
 
 async function responseBody<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -96,6 +100,28 @@ export function searchDocuments(payload: SearchRequest, signal?: AbortSignal): P
   });
 }
 
+/** The server-sent events of a response, each as its name and parsed JSON data. */
+async function* serverEvents(response: Response, silent: string): AsyncGenerator<{ event: string; message: unknown }> {
+  if (!response.ok || !response.body) {
+    await responseBody(response);
+    throw new Error(silent);
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buffer += value;
+    for (let boundary = buffer.indexOf("\n\n"); boundary >= 0; boundary = buffer.indexOf("\n\n")) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const event = /^event: (.*)$/m.exec(block)?.[1];
+      const data = block.split("\n").filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n");
+      if (event && data) yield { event, message: JSON.parse(data) };
+    }
+  }
+}
+
 /** Runs the search agent, reporting each lookup it makes, and resolves with its ranked results. */
 export async function streamAgentSearch(
   payload: AgentSearchRequest,
@@ -108,29 +134,27 @@ export async function streamAgentSearch(
     body: JSON.stringify(payload),
     signal,
   });
-  if (!response.ok || !response.body) {
-    await responseBody(response);
-    throw new Error("The search agent did not respond.");
-  }
-  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-  let buffer = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += value;
-    for (let boundary = buffer.indexOf("\n\n"); boundary >= 0; boundary = buffer.indexOf("\n\n")) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      const event = /^event: (.*)$/m.exec(block)?.[1];
-      const data = block.split("\n").filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n");
-      if (!event || !data) continue;
-      const message = JSON.parse(data);
-      if (event === "progress") onProgress(message as AgentProgress);
-      else if (event === "result") return message as AgentSearchResult;
-      else if (event === "error") throw new Error((message as { message: string }).message);
-    }
+  for await (const { event, message } of serverEvents(response, "The search agent did not respond.")) {
+    if (event === "progress") onProgress(message as AgentProgress);
+    else if (event === "result") return message as AgentSearchResult;
+    else if (event === "error") throw new Error((message as { message: string }).message);
   }
   throw new Error("The search agent stopped without results.");
+}
+
+/** Scans from the printer, reporting each page as it is done, and resolves with the new document. */
+export async function streamScan(payload: ScanRequest, onPage: (pages: number) => void): Promise<ScanResult> {
+  const response = await fetch("/api/scan", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  for await (const { event, message } of serverEvents(response, "The scanner did not respond.")) {
+    if (event === "progress") onPage((message as { pages: number }).pages);
+    else if (event === "result") return message as ScanResult;
+    else if (event === "error") throw new Error((message as { message: string }).message);
+  }
+  throw new Error("The scan stopped without a result.");
 }
 
 export function getSenders(): Promise<string[]> {

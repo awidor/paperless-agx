@@ -13,8 +13,9 @@ use futures::TryStreamExt;
 use paperless_ingest::embed_pending_chunks;
 use paperless_models::{
     AgentSearchRequest, Document, DocumentPageResult, DocumentPatch, DocumentQuery, DocumentSort,
-    HealthResponse, IngestionStatus, MediaType, MetadataSource, PageInfo, PassageKind, SearchHit,
-    SearchPassage, SearchRequest, SearchResponse, UploadMetadata,
+    HealthResponse, IngestionStatus, MediaType, MetadataSource, PageInfo, PassageKind,
+    ScanProgress, ScanRequest, ScanResult, SearchHit, SearchPassage, SearchRequest, SearchResponse,
+    UploadMetadata,
 };
 use paperless_search::{RankedChunk, collapse_to_documents, reciprocal_rank_fusion};
 use paperless_storage::{ChunkMatch, SearchFilter, StoredObject};
@@ -53,6 +54,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         embedding_configured: state.embeddings.is_some(),
         embedding_model: state.embedding_model.clone(),
         agent_configured: state.agent.is_some(),
+        scanner_configured: state.scanner.is_some(),
     })
 }
 
@@ -109,6 +111,22 @@ pub async fn upload_document(
 
     let stored =
         stored.ok_or_else(|| AppError::bad_request(anyhow::anyhow!("missing file field")))?;
+    let metadata = UploadMetadata {
+        filename: filename.unwrap_or_else(|| "upload".into()),
+        title,
+        created_at,
+    };
+    let (status, document) = add_document(&state, stored, metadata).await?;
+    Ok((status, Json(document)))
+}
+
+/// Adds a stored file to the library and queues it for reading. A file already in the library
+/// is not added twice: the existing document comes back with `200 OK` instead of `201 Created`.
+async fn add_document(
+    state: &AppState,
+    stored: StoredObject,
+    metadata: UploadMetadata,
+) -> Result<(StatusCode, Document), AppError> {
     if stored.file_size == 0 {
         remove_unreferenced_object(&stored).await;
         return Err(AppError::bad_request(anyhow::anyhow!(
@@ -122,11 +140,6 @@ pub async fn upload_document(
             return Err(AppError::bad_request(error));
         }
     };
-    let metadata = UploadMetadata {
-        filename: filename.unwrap_or_else(|| "upload".into()),
-        title,
-        created_at,
-    };
 
     let _commit = state.upload_commit.lock().await;
     if let Some(existing) = state.documents.find_by_hash(&stored.content_hash).await? {
@@ -134,7 +147,7 @@ pub async fn upload_document(
             .documents
             .merge_missing_upload_metadata(&existing, &metadata)
             .await?;
-        return Ok((StatusCode::OK, Json(merged)));
+        return Ok((StatusCode::OK, merged));
     }
 
     let now = Utc::now();
@@ -161,7 +174,132 @@ pub async fn upload_document(
     };
     state.documents.insert(&document).await?;
     state.ingestion.enqueue(document.document_id).await?;
-    Ok((StatusCode::CREATED, Json(document)))
+    Ok((StatusCode::CREATED, document))
+}
+
+/// Scans from the configured printer and adds every page scanned as one PDF document.
+/// Streams server-sent events: `progress` (ScanProgress) after each page, then one `result`
+/// (ScanResult) or `error`. The scan runs to the end even if the client goes away, so a stack
+/// in the feeder is never left half-scanned.
+pub async fn scan(
+    State(state): State<AppState>,
+    Json(request): Json<ScanRequest>,
+) -> Result<Response, AppError> {
+    let scanner = state.scanner.clone().ok_or_else(|| {
+        AppError::service_unavailable(anyhow::anyhow!("no scanner is configured"))
+    })?;
+    if !paperless_scanner::SUPPORTED_DPI.contains(&request.dpi) {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "dpi must be one of {:?}",
+            paperless_scanner::SUPPORTED_DPI
+        )));
+    }
+    let running = state
+        .scan_running
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| AppError::conflict(anyhow::anyhow!("a scan is already running")))?;
+    let (events, receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let _running = running;
+        let progress = events.clone();
+        let outcome = scan_into_library(&state, &scanner, request, move |pages| {
+            let _ = progress.send(server_event("progress", &ScanProgress { pages }));
+        })
+        .await;
+        let event = match outcome {
+            Ok(result) => {
+                tracing::info!(
+                    document_id = result.document.document_id,
+                    pages = result.pages,
+                    "scan added"
+                );
+                server_event("result", &result)
+            }
+            Err(ScanFailure::Scanner(error)) => {
+                tracing::warn!(%error, "scan failed");
+                server_event(
+                    "error",
+                    &serde_json::json!({ "message": error.to_string() }),
+                )
+            }
+            Err(ScanFailure::Library(error)) => {
+                tracing::error!(error = %format!("{error:#}"), "scanned pages could not be added");
+                server_event(
+                    "error",
+                    &serde_json::json!({ "message": "The pages were scanned but could not be added to the library." }),
+                )
+            }
+        };
+        let _ = events.send(event);
+    });
+    let stream = futures::stream::unfold(receiver, |mut receiver| async move {
+        receiver
+            .recv()
+            .await
+            .map(|event| (Ok::<_, std::convert::Infallible>(event), receiver))
+    });
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(stream))
+        .context("build scan stream")
+        .map_err(AppError::from)
+}
+
+enum ScanFailure {
+    Scanner(paperless_scanner::ScanError),
+    Library(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ScanFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Library(error)
+    }
+}
+
+async fn scan_into_library(
+    state: &AppState,
+    scanner: &paperless_scanner::Scanner,
+    request: ScanRequest,
+    on_page: impl FnMut(u32) + Send,
+) -> Result<ScanResult, ScanFailure> {
+    let settings = paperless_scanner::ScanSettings {
+        source: request.source,
+        dpi: request.dpi,
+    };
+    let pages = scanner
+        .scan(settings, on_page)
+        .await
+        .map_err(ScanFailure::Scanner)?;
+    let count = pages.len() as u32;
+    let pdf =
+        tokio::task::spawn_blocking(move || paperless_scanner::render_pdf(&pages, request.mode))
+            .await
+            .context("render scanned pages")?
+            .map_err(ScanFailure::Scanner)?;
+    let stored = state.objects.store(pdf.as_slice()).await?;
+    let metadata = UploadMetadata {
+        filename: format!(
+            "Scan {}.pdf",
+            chrono::Local::now().format("%Y-%m-%d %H.%M.%S")
+        ),
+        title: None,
+        created_at: None,
+    };
+    let (_, document) = add_document(state, stored, metadata)
+        .await
+        .map_err(|error| ScanFailure::Library(error.source))?;
+    Ok(ScanResult {
+        document,
+        pages: count,
+    })
+}
+
+fn server_event(event: &str, data: &impl serde::Serialize) -> String {
+    let data = serde_json::to_string(data).expect("scan events serialize");
+    format!("event: {event}\ndata: {data}\n\n")
 }
 
 pub async fn list_documents(
@@ -692,6 +830,13 @@ impl AppError {
     fn not_found(source: anyhow::Error) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            source,
+        }
+    }
+
+    fn conflict(source: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             source,
         }
     }

@@ -4,15 +4,18 @@ import {
   getHealth,
   getSenders,
   listDocuments,
+  streamScan,
   uploadDocument,
   type Document,
   type DocumentPageResult,
   type DocumentSort,
   type HealthResponse,
   type LibraryQuery,
+  type ScanRequest,
 } from "./api";
 import { activeFilterCount, FilterBar, FilterToggle, initialQuery, Library, type View } from "./Library";
 import { Reader } from "./Reader";
+import { ScanTray, type ScanState } from "./Scan";
 import { useSearch } from "./search";
 import { SearchView } from "./SearchView";
 import { TopBar } from "./TopBar";
@@ -88,6 +91,7 @@ export default function App() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [dropping, setDropping] = useState(false);
   const [uploadState, setUploadState] = useState<UploadState | null>(null);
+  const [scanState, setScanState] = useState<ScanState | null>(null);
   const [libraryError, setLibraryError] = useState("");
   const [contextError, setContextError] = useState("");
   const [dataVersion, setDataVersion] = useState(0);
@@ -103,6 +107,7 @@ export default function App() {
 
   const searching = activeSearch.length > 0;
   const uploading = uploadState?.active ?? false;
+  const scanning = scanState?.active ?? false;
   const error = libraryError || contextError;
   const search = useSearch(activeSearch, query, searchRun);
   const searchBusy = search?.status === "running";
@@ -250,6 +255,19 @@ export default function App() {
   }
   uploadRef.current = upload;
 
+  async function scan(settings: ScanRequest) {
+    if (scanning) return;
+    setScanState({ active: true, settings, pages: 0, document: null, error: "" });
+    try {
+      const result = await streamScan(settings, (pages) => setScanState((state) => state && { ...state, pages }));
+      setScanState({ active: false, settings, pages: result.pages, document: result.document, error: "" });
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : "The scan failed.";
+      setScanState((state) => ({ active: false, settings, pages: state?.pages ?? 0, document: null, error }));
+    }
+    setDataVersion((version) => version + 1);
+  }
+
   useEffect(() => {
     function onDragEnter(event: DragEvent) {
       if (event.dataTransfer?.types.includes("Files")) {
@@ -313,6 +331,7 @@ export default function App() {
 
   const chooseFiles = () => fileInputRef.current?.click();
   const dismissUpload = useCallback(() => setUploadState(null), []);
+  const dismissScan = useCallback(() => setScanState(null), []);
 
   return (
     <div className="app">
@@ -322,12 +341,14 @@ export default function App() {
         searching={searching}
         busy={searchBusy}
         uploading={uploading}
+        scanning={scanning}
         health={health}
         onText={setSearchText}
         onSubmit={runSearch}
         onClear={clearSearch}
         onHome={clearSearch}
         onUpload={chooseFiles}
+        onScan={(settings) => void scan(settings)}
       />
       <input
         ref={fileInputRef}
@@ -378,7 +399,10 @@ export default function App() {
         </div>
       </main>
 
-      <UploadTray state={uploadState} onDismiss={dismissUpload} />
+      <div className="trays">
+        <ScanTray state={scanState} onOpen={(document) => openDocument(document)} onRetry={(settings) => void scan(settings)} onDismiss={dismissScan} />
+        <UploadTray state={uploadState} onDismiss={dismissUpload} />
+      </div>
 
       {dropping && <div className="drop" aria-hidden="true">
         <div className="drop__sheet">
