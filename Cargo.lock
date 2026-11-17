@@ -1233,11 +1233,16 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "html2md",
+ "html5ever",
  "image",
+ "markup5ever_rcdom",
  "paperless-embeddings",
  "paperless-models",
- "paperless-ocr-client",
  "paperless-storage",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -1250,27 +1255,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
-]
-
-[[package]]
-name = "paperless-ocr-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "chrono",
- "futures",
- "html2md",
- "html5ever",
- "markup5ever_rcdom",
- "paperless-models",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "url",
 ]
 
 [[package]]
@@ -1309,7 +1293,6 @@ dependencies = [
  "paperless-embeddings",
  "paperless-ingest",
  "paperless-models",
- "paperless-ocr-client",
  "paperless-scanner",
  "paperless-search",
  "paperless-storage",

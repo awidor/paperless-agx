@@ -17,7 +17,7 @@ async function mockApi(context: BrowserContext, options: { scanner: boolean; sca
       return;
     }
     const responses: Record<string, unknown> = {
-      "/api/health": { ocr_configured: true, embedding_configured: true, agent_configured: true, scanner_configured: options.scanner },
+      "/api/health": { embedding_configured: true, scanner_configured: options.scanner },
       "/api/senders": [],
       "/api/documents": { items: sampleDocuments, total: sampleDocuments.length, page: 1, page_size: 24 },
       "/api/documents/42": scanned,

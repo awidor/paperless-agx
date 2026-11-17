@@ -4,6 +4,7 @@ import { RunContext } from "./context.ts";
 import type { Paperless } from "./paperless.ts";
 import { systemPrompt, type ArchiveOverview } from "./prompt.ts";
 import { createTools, SUBMIT_TOOL } from "./tools.ts";
+import { traceEvent } from "./trace.ts";
 import type { AgentProgress, AgentSearchRequest, AgentSearchResult, Document } from "./types.ts";
 
 export type AgentRuntime = {
@@ -15,6 +16,9 @@ export type AgentRuntime = {
   maxTurns: number;
   timeoutMs: number;
   maxResults: number;
+  /** What the search tool may use; the benchmarks switch these off to measure them. */
+  search: { semantic: boolean; summaries: boolean };
+  indexing: { timeoutMs: number; pagesPerView: number };
   now?: () => Date;
 };
 
@@ -33,6 +37,8 @@ export async function runAgentSearch(
   runtime: AgentRuntime,
   onProgress: (progress: AgentProgress) => void,
   signal?: AbortSignal,
+  /** Receives a line per model reply and per rejected tool call, for debugging a search. */
+  trace?: (line: string) => void,
 ): Promise<AgentRun> {
   const query = request.query.trim();
   if (!query) throw new Error("search query must not be empty");
@@ -43,7 +49,7 @@ export async function runAgentSearch(
   });
   onProgress({ kind: "thinking", label: "Planning the search" });
   const archive = await describeArchive(runtime.paperless, signal);
-  const tools = createTools(context, runtime.paperless, { maxResults: runtime.maxResults });
+  const tools = createTools(context, runtime.paperless, { maxResults: runtime.maxResults, ...runtime.search });
   const providers = new Set<string>();
   const agent = new Agent({
     initialState: {
@@ -85,6 +91,7 @@ export async function runAgentSearch(
     return undefined;
   };
   agent.subscribe((event) => {
+    if (trace) traceEvent(event, trace);
     if (event.type === "tool_execution_start") {
       toolCalls += 1;
       onProgress(progressFor(event.toolName, event.args, context));

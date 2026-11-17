@@ -10,106 +10,92 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use image::{DynamicImage, ImageFormat};
 use paperless_models::{Document, IngestionStatus, MediaType};
-use paperless_ocr_client::{LlmConfig, OcrConfig};
 use paperless_scanner::fake::{FakeScanner, FakeSetup};
 use paperless_server::{AgentConfig, AppConfig, EmbeddingConfig, ScannerConfig, build_app};
 use paperless_storage::{DataLayout, DocumentRepository, ObjectStore};
 use tower::ServiceExt;
 use url::Url;
 
-fn config(data_dir: &Path, base_url: Url) -> AppConfig {
+fn config(data_dir: &Path, agent_url: Url) -> AppConfig {
     AppConfig {
         data_dir: data_dir.to_path_buf(),
         listen_addr: "0.0.0.0:0".parse().unwrap(),
         queue_capacity: 4,
         render_concurrency: 2,
         eager_thumbnail_pages: 3,
+        page_dpi: 120,
         embeddings: None,
-        agent: None,
+        agent: AgentConfig { url: agent_url },
         scanner: None,
-        llm: LlmConfig {
-            base_url: base_url.clone(),
-            model: "z-ai/glm-5.3-flash".into(),
-            api_key_env: "PATH".into(),
-            max_concurrency: 1,
-        },
-        ocr: OcrConfig {
-            base_url,
-            model: "chandra".into(),
-            api_key_env: "PATH".into(),
-            max_concurrency: 2,
-            pages_per_request: 4,
-            max_output_tokens: 16_384,
-            profile: Default::default(),
-            dpi: 120,
-        },
     }
 }
 
-async fn start_ocr() -> Url {
-    start_ocr_with_text("Recognized page text".into()).await
+async fn start_agent() -> Url {
+    start_agent_with_text("Recognized page text".into()).await
 }
 
-async fn start_blocked_ocr() -> Url {
-    let app = Router::new().route(
-        "/v1/chat/completions",
-        post(|| async { std::future::pending::<String>().await }),
-    );
+async fn serve(app: Router) -> Url {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Url::parse(&format!("http://{address}/v1")).unwrap()
+    Url::parse(&format!("http://{address}/")).unwrap()
 }
 
-async fn start_ocr_with_text(text: String) -> Url {
-    let app = Router::new()
-        .route(
-            "/v1/chat/completions",
-            post(move |Json(body): Json<serde_json::Value>| {
-                let text = text.clone();
-                async move {
-                    let content = body["messages"][0]["content"].as_array();
-                    let is_ocr =
-                        content.is_some_and(|items| items.iter().any(|item| item["type"] == "image_url"));
-                    let content = if is_ocr {
-                        format!(
-                            "<div data-label=\"Text\" data-bbox=\"0 0 1000 1000\"><p>{text}</p></div>"
-                        )
-                    } else {
-                        serde_json::json!({
+/// An agent service whose indexing sessions never finish.
+async fn start_blocked_agent() -> Url {
+    serve(Router::new().route(
+        "/index",
+        post(|| async { std::future::pending::<String>().await }),
+    ))
+    .await
+}
+
+/// An agent service that indexes every page as one block of `text`, with embeddings beside it.
+async fn start_agent_with_text(text: String) -> Url {
+    serve(
+        Router::new()
+            .route(
+                "/index",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let text = text.clone();
+                    async move {
+                        assert!(body["document_id"].as_u64().is_some());
+                        let result = serde_json::json!({
+                            "pages": [{
+                                "page": 1,
+                                "blocks": [{"label": "Text", "bbox": [0, 0, 1000, 1000], "html": format!("<p>{text}</p>")}]
+                            }],
                             "title": "Extracted title",
+                            "sender": null,
                             "created_at": null,
                             "summary": "Testschreiben mit Kundennummer 4711."
-                        })
-                        .to_string()
-                    };
+                        });
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            format!(
+                                "event: progress\ndata: {{\"label\":\"Reading page 1\"}}\n\n: keep-alive\n\nevent: result\ndata: {result}\n\n"
+                            ),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/embeddings",
+                post(|Json(body): Json<serde_json::Value>| async move {
+                    assert_eq!(body["provider"]["zdr"], true);
+                    assert_eq!(body["provider"]["data_collection"], "deny");
+                    assert!(body["input"].is_string(), "one input per request");
+                    let values = vec![1.0_f32; paperless_models::EMBEDDING_DIMENSION];
                     Json(serde_json::json!({
-                        "choices": [{"message": {"content": content}}]
+                        "object": "list",
+                        "data": [{ "embedding": values, "index": 0 }]
                     }))
-                }
-            }),
-        )
-        .route(
-            "/v1/embeddings",
-            post(|Json(body): Json<serde_json::Value>| async move {
-                assert_eq!(body["provider"]["zdr"], true);
-                assert_eq!(body["provider"]["data_collection"], "deny");
-                assert!(body["input"].is_string(), "one input per request");
-                let values = vec![1.0_f32; paperless_models::EMBEDDING_DIMENSION];
-                Json(serde_json::json!({
-                    "object": "list",
-                    "data": [{ "embedding": values, "index": 0 }]
-                }))
-            }),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    Url::parse(&format!("http://{address}/v1")).unwrap()
+                }),
+            ),
+    )
+    .await
 }
 
 fn png() -> Vec<u8> {
@@ -223,7 +209,7 @@ async fn wait_for_ready(app: &Router, document_id: u64) -> Document {
 #[tokio::test]
 async fn upload_acceptance_does_not_wait_for_processing_capacity() {
     let temporary = tempfile::tempdir().unwrap();
-    let app = build_app(config(temporary.path(), start_blocked_ocr().await))
+    let app = build_app(config(temporary.path(), start_blocked_agent().await))
         .await
         .unwrap();
 
@@ -247,10 +233,10 @@ async fn upload_acceptance_does_not_wait_for_processing_capacity() {
 #[tokio::test]
 async fn upload_with_embeddings_reaches_ready_and_is_searchable() {
     let temporary = tempfile::tempdir().unwrap();
-    let base_url = start_ocr_with_text("Recognized page text. ".repeat(150)).await;
+    let base_url = start_agent_with_text("Recognized page text. ".repeat(150)).await;
     let mut settings = config(temporary.path(), base_url.clone());
     settings.embeddings = Some(EmbeddingConfig {
-        base_url,
+        base_url: base_url.join("v1").unwrap(),
         model: "google/gemini-embedding-2".into(),
         api_key_env: "PATH".into(),
         max_concurrency: 1,
@@ -336,10 +322,10 @@ async fn agent_search_streams_the_agent_events() {
         axum::serve(listener, agent).await.unwrap();
     });
     let temporary = tempfile::tempdir().unwrap();
-    let mut settings = config(temporary.path(), start_ocr().await);
-    settings.agent = Some(AgentConfig {
-        url: Url::parse(&format!("http://{address}")).unwrap(),
-    });
+    let settings = config(
+        temporary.path(),
+        Url::parse(&format!("http://{address}")).unwrap(),
+    );
     let app = build_app(settings).await.unwrap();
 
     let response = app
@@ -374,6 +360,8 @@ fn old_search_payloads_default_new_fields() {
     .unwrap();
 
     assert!(!request.exact);
+    assert!(request.semantic);
+    assert!(request.summaries);
 
     let response: paperless_models::SearchResponse = serde_json::from_value(serde_json::json!({
         "items": [],
@@ -388,7 +376,7 @@ fn old_search_payloads_default_new_fields() {
 #[tokio::test]
 async fn health_upload_duplicate_read_and_image_preview_work() {
     let temporary = tempfile::tempdir().unwrap();
-    let app = build_app(config(temporary.path(), start_ocr().await))
+    let app = build_app(config(temporary.path(), start_agent().await))
         .await
         .unwrap();
 
@@ -401,8 +389,7 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
     let health_json: serde_json::Value =
         serde_json::from_slice(&health.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(health_json["status"], "ok");
-    assert_eq!(health_json["ocr_configured"], true);
-    assert_eq!(health_json["metadata_model"], "z-ai/glm-5.3-flash");
+    assert_eq!(health_json["embedding_configured"], false);
 
     let image = png();
     let (status, uploaded) = upload(&app, "scan.png", "image/png", &image, "Original title").await;
@@ -628,7 +615,7 @@ async fn startup_resumes_a_stored_image() {
     repository.insert(&document).await.unwrap();
     drop(repository);
 
-    let app = build_app(config(temporary.path(), start_ocr().await))
+    let app = build_app(config(temporary.path(), start_agent().await))
         .await
         .unwrap();
     let resumed = wait_for_ocr(&app, document.document_id).await;
@@ -669,7 +656,7 @@ async fn startup_resumes_an_image_at_the_ocr_stage() {
     repository.insert(&document).await.unwrap();
     drop(repository);
 
-    let app = build_app(config(temporary.path(), start_ocr().await))
+    let app = build_app(config(temporary.path(), start_agent().await))
         .await
         .unwrap();
     let resumed = wait_for_ocr(&app, document.document_id).await;
@@ -706,7 +693,7 @@ async fn startup_finishes_an_interrupted_index_commit() {
     repository.insert(&document).await.unwrap();
     drop(repository);
 
-    let app = build_app(config(temporary.path(), start_ocr().await))
+    let app = build_app(config(temporary.path(), start_agent().await))
         .await
         .unwrap();
     for _ in 0..100 {
@@ -753,7 +740,7 @@ async fn startup_repeats_deleted_object_cleanup_safely() {
     repository.insert(&document).await.unwrap();
     drop(repository);
 
-    let app = build_app(config(temporary.path(), start_ocr().await))
+    let app = build_app(config(temporary.path(), start_agent().await))
         .await
         .unwrap();
     for _ in 0..100 {
@@ -765,7 +752,7 @@ async fn startup_repeats_deleted_object_cleanup_safely() {
     assert!(!object_path.exists());
     drop(app);
 
-    let _ = build_app(config(temporary.path(), start_ocr().await))
+    let _ = build_app(config(temporary.path(), start_agent().await))
         .await
         .unwrap();
     assert!(!object_path.exists());
@@ -774,7 +761,7 @@ async fn startup_repeats_deleted_object_cleanup_safely() {
 #[tokio::test]
 async fn pdf_upload_generates_pages_and_thumbnail() {
     let temporary = tempfile::tempdir().unwrap();
-    let app = build_app(config(temporary.path(), start_ocr().await))
+    let app = build_app(config(temporary.path(), start_agent().await))
         .await
         .unwrap();
     let pdf = one_page_pdf();
@@ -812,7 +799,7 @@ fn last_event(stream: &str, event: &str) -> serde_json::Value {
 
 async fn app_with_scanner(data_dir: &Path, setup: FakeSetup) -> (Router, FakeScanner) {
     let fake = FakeScanner::start(setup).await;
-    let mut settings = config(data_dir, start_ocr().await);
+    let mut settings = config(data_dir, start_agent().await);
     settings.scanner = Some(ScannerConfig {
         host: "127.0.0.1".into(),
         port: fake.port(),
@@ -879,7 +866,7 @@ async fn scan_reports_scanner_problems_and_rejects_bad_requests() {
 
     let unconfigured = build_app(config(
         temporary.path().join("other").as_path(),
-        start_ocr().await,
+        start_agent().await,
     ))
     .await
     .unwrap();

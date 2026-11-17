@@ -43,7 +43,7 @@ test.beforeEach(async ({ context }) => {
       return;
     }
     const responses: Record<string, unknown> = {
-      "/api/health": { ocr_configured: false, embedding_configured: false },
+      "/api/health": { embedding_configured: false },
       "/api/senders": sampleDocuments.map((item) => item.sender),
       "/api/documents": { items: sampleDocuments, total: sampleDocuments.length, page: 1, page_size: 24 },
       [`/api/documents/${document.document_id}`]: document,

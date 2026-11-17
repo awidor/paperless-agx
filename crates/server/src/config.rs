@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use paperless_ocr_client::{LlmConfig, OcrConfig};
 use serde::Deserialize;
 use url::Url;
 
@@ -16,7 +15,8 @@ pub struct EmbeddingConfig {
     pub max_concurrency: usize,
 }
 
-/// The search agent service (`agent/`); `/api/search/agent` forwards to it.
+/// The agent service (`agent/`): it indexes every document and answers agent searches.
+/// It is the only part that talks to a language model.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
     pub url: Url,
@@ -42,14 +42,18 @@ pub struct AppConfig {
     pub queue_capacity: usize,
     pub render_concurrency: usize,
     pub eager_thumbnail_pages: u32,
+    /// Resolution PDF pages are rendered at for the indexing agent and the page viewer.
+    #[serde(default = "default_page_dpi")]
+    pub page_dpi: u32,
     #[serde(default)]
     pub embeddings: Option<EmbeddingConfig>,
-    #[serde(default)]
-    pub agent: Option<AgentConfig>,
+    pub agent: AgentConfig,
     #[serde(default)]
     pub scanner: Option<ScannerConfig>,
-    pub llm: LlmConfig,
-    pub ocr: OcrConfig,
+}
+
+const fn default_page_dpi() -> u32 {
+    150
 }
 
 impl AppConfig {
@@ -71,8 +75,9 @@ impl AppConfig {
         if self.render_concurrency == 0 {
             bail!("render_concurrency must be greater than zero");
         }
-        self.ocr.check()?;
-        self.llm.check()?;
+        if self.page_dpi == 0 {
+            bail!("page_dpi must be greater than zero");
+        }
         if let Some(embedding) = &self.embeddings {
             if embedding.model.trim().is_empty() {
                 bail!("embedding.model must not be empty");
@@ -123,22 +128,6 @@ url = "http://paperless-agent:3100"
 
 [scanner]
 host = "192.168.1.218"
-
-[ocr]
-base_url = "http://127.0.0.1:8765/v1"
-model = "surya"
-profile = "surya"
-api_key_env = "OCR_API_KEY"
-max_concurrency = 2
-pages_per_request = 2
-max_output_tokens = 12288
-dpi = 192
-
-[llm]
-base_url = "https://openrouter.ai/api/v1"
-model = "z-ai/glm-5.3-flash"
-api_key_env = "OPENROUTER_API_KEY"
-max_concurrency = 1
             "#,
         )
         .await
@@ -157,26 +146,17 @@ max_concurrency = 1
             "OPENROUTER_API_KEY"
         );
         assert_eq!(config.embeddings.as_ref().unwrap().max_concurrency, 2);
-        assert_eq!(
-            config.agent.as_ref().unwrap().url.as_str(),
-            "http://paperless-agent:3100/"
-        );
+        assert_eq!(config.agent.url.as_str(), "http://paperless-agent:3100/");
+        assert_eq!(config.page_dpi, 150);
         let scanner = config.scanner.as_ref().unwrap();
         assert_eq!(
             (scanner.host.as_str(), scanner.port),
             ("192.168.1.218", 9400)
         );
-        assert_eq!(config.ocr.pages_per_request, 2);
-        assert_eq!(config.ocr.model, "surya");
-        assert_eq!(config.ocr.profile, paperless_ocr_client::OcrProfile::Surya);
-        assert_eq!(config.ocr.max_output_tokens, 12_288);
-        assert_eq!(config.ocr.dpi, 192);
-        assert_eq!(config.llm.model, "z-ai/glm-5.3-flash");
-        assert_eq!(config.llm.max_concurrency, 1);
     }
 
     #[test]
-    fn requires_llm_configuration() {
+    fn requires_the_agent_service() {
         let error = toml::from_str::<AppConfig>(
             r#"
 data_dir = "/data"
@@ -185,16 +165,9 @@ queue_capacity = 16
 render_concurrency = 2
 eager_thumbnail_pages = 3
 
-[ocr]
-base_url = "http://127.0.0.1:8765/v1"
-model = "chandra"
-api_key_env = "OCR_API_KEY"
-max_concurrency = 2
-pages_per_request = 2
-max_output_tokens = 24576
 "#,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("missing field `llm`"));
+        assert!(error.to_string().contains("missing field `agent`"));
     }
 }

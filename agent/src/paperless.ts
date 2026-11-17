@@ -16,7 +16,11 @@ export interface Paperless {
   pages(documentId: number, signal?: AbortSignal): Promise<PageInfo[]>;
   document(documentId: number, signal?: AbortSignal): Promise<Document | null>;
   senders(signal?: AbortSignal): Promise<string[]>;
+  /** The page as the archive renders it; block positions are relative to this image. */
+  pageImage(documentId: number, page: number, signal?: AbortSignal): Promise<PageImage>;
 }
+
+export type PageImage = { data: string; mimeType: string };
 
 export class PaperlessClient implements Paperless {
   constructor(private readonly baseUrl: string) {}
@@ -51,6 +55,13 @@ export class PaperlessClient implements Paperless {
 
   senders(signal?: AbortSignal): Promise<string[]> {
     return this.request("/api/senders", { signal });
+  }
+
+  async pageImage(documentId: number, page: number, signal?: AbortSignal): Promise<PageImage> {
+    const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/pages/${page}/image`, { signal });
+    if (!response.ok) await body(response);
+    const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim() || "image/webp";
+    return { data: Buffer.from(await response.arrayBuffer()).toString("base64"), mimeType };
   }
 
   private async request<T>(path: string, init: RequestInit): Promise<T> {

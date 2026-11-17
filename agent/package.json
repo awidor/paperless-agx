@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "start": "bun src/server.ts",
-    "eval": "bun src/eval.ts"
+    "eval": "bun src/eval.ts",
+    "eval:index": "bun src/index-eval.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^1.5.0",

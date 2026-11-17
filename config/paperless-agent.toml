@@ -1,17 +1,25 @@
 listen = "0.0.0.0:3100"
-# Paperless AGX, which serves the archive the agent's tools read.
+# Paperless AGX, which serves the archive the agents read.
 paperless_url = "http://paperless-agx:3000"
 
+# The one model behind every agent: indexing (reading the pages and the document's details) and search.
 [model]
-# An OpenRouter model from Pi's catalog, with its reasoning effort.
 id = "anthropic/claude-haiku-5.5"
 reasoning = "medium"
 api_key_env = "OPENROUTER_API_KEY"
 # OpenRouter providers to route to. Requests also require zero data retention.
 providers = ["google-vertex", "amazon-bedrock"]
+# A model Pi's catalog does not list yet can be described under [model.definition]
+# (name, images, input_cost, output_cost, cache_read_cost, cache_write_cost, context_window,
+# max_tokens; prices in USD per million tokens).
 
+# Search: model turns per search; the last one may only submit results.
 [limits]
-# Model turns per search; the last one may only submit results.
 max_turns = 8
 timeout_seconds = 90
 max_results = 10
+
+# Indexing: one agent session per document.
+[indexing]
+timeout_seconds = 900
+pages_per_view = 4

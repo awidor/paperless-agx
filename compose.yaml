@@ -5,16 +5,14 @@ services:
     restart: unless-stopped
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OCR_API_KEY: ${OCR_API_KEY:-EMPTY}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
       - ./data:/data
       - ./config/paperless-agx.docker.toml:/opt/paperless/config/paperless-agx.toml:ro
 
-  # Search agent behind /api/search/agent. Paperless reaches it at paperless-agent:3100.
+  # The agent service: indexes documents and answers searches. Paperless reaches it at
+  # paperless-agent:3100, and it reads the archive at paperless-agx:3000.
   paperless-agent:
     build:
       context: .

@@ -8,12 +8,13 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use paperless_embeddings::EmbeddingService;
 use paperless_models::{Document, DocumentPage, IngestionStatus};
-use paperless_ocr_client::{OcrClient, is_transient_request_failure};
 use paperless_storage::{ChunkRepository, DocumentRepository, PageRepository};
 use tokio::sync::{Notify, Semaphore};
 use tracing::{error, warn};
 
-use crate::{MetadataService, PreviewService, chunk_document};
+use crate::{
+    IndexingAgent, MetadataService, PreviewService, chunk_document, indexer::is_transient_failure,
+};
 
 const TRANSIENT_RETRY_DELAY: Duration = Duration::from_secs(60);
 
@@ -35,7 +36,7 @@ impl IngestionQueue {
         pages: PageRepository,
         chunks: ChunkRepository,
         previews: PreviewService,
-        ocr: OcrClient,
+        indexer: IndexingAgent,
         embeddings: Option<EmbeddingService>,
         capacity: usize,
         job_concurrency: usize,
@@ -58,7 +59,7 @@ impl IngestionQueue {
             Arc::new(pages),
             Arc::new(chunks),
             previews,
-            ocr,
+            indexer,
             embeddings,
             metadata,
             job_concurrency,
@@ -104,7 +105,7 @@ async fn run_dispatcher(
     pages: Arc<PageRepository>,
     chunks: Arc<ChunkRepository>,
     previews: PreviewService,
-    ocr: OcrClient,
+    indexer: IndexingAgent,
     embeddings: Option<EmbeddingService>,
     metadata: MetadataService,
     job_concurrency: usize,
@@ -148,7 +149,7 @@ async fn run_dispatcher(
             let pages = pages.clone();
             let chunks = chunks.clone();
             let previews = previews.clone();
-            let ocr = ocr.clone();
+            let indexer = indexer.clone();
             let embeddings = embeddings.clone();
             let metadata = metadata.clone();
             let active = active.clone();
@@ -159,7 +160,7 @@ async fn run_dispatcher(
                     pages,
                     chunks,
                     previews,
-                    ocr,
+                    indexer,
                     embeddings,
                     metadata,
                     document_id,
@@ -199,7 +200,7 @@ async fn process_document(
     pages: Arc<PageRepository>,
     chunks: Arc<ChunkRepository>,
     previews: PreviewService,
-    ocr: OcrClient,
+    indexer: IndexingAgent,
     embeddings: Option<EmbeddingService>,
     metadata: MetadataService,
     document_id: u64,
@@ -229,16 +230,40 @@ async fn process_document(
         }
 
         if document.status == IngestionStatus::Ocr {
-            let recognized = recognize_document(previews.clone(), ocr.clone(), document.clone())
+            // One agent session reads every page and the document's details.
+            let indexed = indexer
+                .index(document_id, document.page_count)
                 .await
-                .context("OCR failed")?;
+                .context("indexing failed")?;
+            let now = Utc::now();
             pages
-                .replace_document_pages(document_id, recognized)
+                .replace_document_pages(
+                    document_id,
+                    indexed
+                        .pages
+                        .into_iter()
+                        .map(|page| DocumentPage {
+                            document_id,
+                            page: page.page,
+                            text: page.text,
+                            blocks: page.blocks,
+                            html: Some(page.html),
+                            updated_at: now,
+                        })
+                        .collect(),
+                )
                 .await?;
+            metadata
+                .apply_inferred(document_id, indexed.metadata)
+                .await
+                .context("storing the document's details failed")?;
             repository
                 .set_status(document_id, IngestionStatus::TextReady, None)
                 .await?;
-            document.status = IngestionStatus::TextReady;
+            document = repository
+                .get(document_id)
+                .await?
+                .context("document disappeared while indexing")?;
         }
 
         if matches!(
@@ -246,17 +271,6 @@ async fn process_document(
             IngestionStatus::TextReady | IngestionStatus::Embedding
         ) {
             let page_rows = pages.list(document_id).await?;
-            if document.status == IngestionStatus::TextReady {
-                let known_senders = repository.senders().await?;
-                let inferred = ocr
-                    .infer_metadata(page_rows.clone(), &known_senders)
-                    .await
-                    .context("metadata inference failed")?;
-                document = metadata
-                    .apply_inferred(document_id, inferred)
-                    .await
-                    .context("metadata storage failed")?;
-            }
             let embeddings = embeddings
                 .as_ref()
                 .context("embedding model is not configured")?;
@@ -285,7 +299,7 @@ async fn process_document(
     .await;
 
     if let Err(error) = result {
-        if is_transient_request_failure(&error) {
+        if is_transient_failure(&error) {
             return Ok(ProcessOutcome::Retry(error));
         }
         fail_document(repository, document_id, format!("{error:#}")).await?;
@@ -318,41 +332,6 @@ async fn embed_document(
         chunk.embedding = vector;
     }
     Ok(chunks)
-}
-
-async fn recognize_document(
-    previews: PreviewService,
-    ocr: OcrClient,
-    document: Document,
-) -> Result<Vec<DocumentPage>> {
-    let batch_size = previews.max_ocr_batch_pages() as u32;
-    let mut recognized = Vec::with_capacity(document.page_count as usize);
-    let mut first_page = 1;
-    while first_page <= document.page_count {
-        let count = batch_size.min(document.page_count - first_page + 1);
-        let images = previews
-            .render_ocr_batch_owned(document.clone(), first_page, count)
-            .await?;
-        let batch = ocr.recognize_pages(images).await?;
-        recognized.extend(batch.into_iter().map(|page| DocumentPage {
-            document_id: document.document_id,
-            page: page.page,
-            text: page.text,
-            blocks: page.blocks,
-            html: Some(page.html),
-            updated_at: Utc::now(),
-        }));
-        first_page += count;
-    }
-    if recognized.len() != document.page_count as usize {
-        bail!(
-            "OCR returned {} pages for a {} page document",
-            recognized.len(),
-            document.page_count
-        );
-    }
-    recognized.sort_by_key(|page| page.page);
-    Ok(recognized)
 }
 
 async fn fail_document(

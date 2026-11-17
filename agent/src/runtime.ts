@@ -1,65 +1,43 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createModels, type Model } from "@earendil-works/pi-ai";
-import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import type { AgentRuntime } from "./agent.ts";
 import type { AgentConfig } from "./config.ts";
+import { createOpenRouterModels, resolveModel } from "./model.ts";
 import { PaperlessClient } from "./paperless.ts";
 
-const CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1";
+/** Overrides for trying other settings, as the benchmarks do. */
+export type RuntimeOverrides = {
+  modelId?: string;
+  reasoning?: ThinkingLevel;
+  providers?: string[];
+  /** Search by meaning as well as by keywords. Default true. */
+  semantic?: boolean;
+  /** Search and show the documents' summaries. Default true. */
+  summaries?: boolean;
+};
 
-/** Connects the agent to OpenRouter through Pi, routed to zero-data-retention endpoints only. */
-export type RuntimeOverrides = { modelId?: string; reasoning?: ThinkingLevel; providers?: string[] };
-
+/** Connects the agents to OpenRouter through Pi, routed to zero-data-retention endpoints only. */
 export function createRuntime(config: AgentConfig, overrides: RuntimeOverrides = {}): AgentRuntime {
   const apiKey = process.env[config.model.apiKeyEnv]?.trim();
   if (!apiKey) throw new Error(`${config.model.apiKeyEnv} is not set`);
   const modelId = overrides.modelId ?? config.model.id;
-  const models = createModels();
-  models.setProvider(openrouterProvider());
-  const catalogModel = models.getModel("openrouter", modelId);
-  if (!catalogModel) throw new Error(`OpenRouter model ${modelId} is not in Pi's model catalog`);
-  // The configured providers belong to the configured model; another model may use any ZDR endpoint.
-  const providers = overrides.providers ?? (modelId === config.model.id ? config.model.providers : []);
-  const chatModel = viaChatCompletions(catalogModel);
-  const model: Model<"openai-completions"> = {
-    ...chatModel,
-    compat: {
-      ...chatModel.compat,
-      openRouterRouting: {
-        ...(providers.length > 0 ? { only: providers } : {}),
-        zdr: true,
-        data_collection: "deny" as const,
-      },
-    },
-  };
+  const ownModel = modelId === config.model.id;
+  // The configured providers and definition belong to the configured model; another model
+  // must be in Pi's catalog and may use any zero-data-retention endpoint.
+  const providers = overrides.providers ?? (ownModel ? config.model.providers : []);
+  const models = createOpenRouterModels();
   return {
     paperless: new PaperlessClient(config.paperlessUrl),
-    model,
+    model: resolveModel(models, modelId, ownModel ? config.model.definition : null, providers),
     streamFn: models.streamSimple.bind(models),
     getApiKey: () => apiKey,
     reasoning: overrides.reasoning ?? config.model.reasoning,
-    maxTurns: config.maxTurns,
-    timeoutMs: config.timeoutSeconds * 1000,
-    maxResults: config.maxResults,
-  };
-}
-
-/**
- * Pi reaches some OpenRouter models, such as Claude, through OpenRouter's Anthropic-style
- * messages endpoint, which does not take provider preferences. Without them the
- * zero-data-retention restriction would be lost, so every model goes through chat completions.
- */
-function viaChatCompletions(model: Model<any>): Model<"openai-completions"> {
-  if (model.api === "openai-completions") return model as Model<"openai-completions">;
-  return {
-    ...model,
-    api: "openai-completions",
-    baseUrl: CHAT_COMPLETIONS_URL,
-    compat: {
-      thinkingFormat: "openrouter",
-      supportsStrictMode: true,
-      sendSessionAffinityHeaders: true,
-      ...(model.id.startsWith("anthropic/") ? { cacheControlFormat: "anthropic" as const } : {}),
+    maxTurns: config.search.maxTurns,
+    timeoutMs: config.search.timeoutSeconds * 1000,
+    maxResults: config.search.maxResults,
+    search: { semantic: overrides.semantic ?? true, summaries: overrides.summaries ?? true },
+    indexing: {
+      timeoutMs: config.indexing.timeoutSeconds * 1000,
+      pagesPerView: config.indexing.pagesPerView,
     },
   };
 }

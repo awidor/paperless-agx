@@ -1,8 +1,11 @@
 data_dir = "/data"
 listen_addr = "0.0.0.0:3000"
 queue_capacity = 16
+# Also the number of documents indexed at once.
 render_concurrency = 2
 eager_thumbnail_pages = 3
+# Resolution PDF pages are rendered at for the indexing agent and the page viewer.
+page_dpi = 150
 
 [embeddings]
 base_url = "https://openrouter.ai/api/v1"
@@ -10,7 +13,8 @@ model = "google/gemini-embedding-2"
 api_key_env = "OPENROUTER_API_KEY"
 max_concurrency = 2
 
-# The search agent service (agent/), behind /api/search/agent.
+# The agent service (agent/): it indexes every document (reads the pages and the document's
+# details) and answers searches. It is the only part that talks to a language model.
 [agent]
 url = "http://paperless-agent:3100"
 
@@ -18,22 +22,3 @@ url = "http://paperless-agent:3100"
 # Give it a fixed address on the router. Remove this section to hide the button.
 [scanner]
 host = "192.168.1.218"
-
-[ocr]
-base_url = "http://host.docker.internal:8765/v1"
-model = "surya"
-profile = "surya"
-api_key_env = "OCR_API_KEY"
-# Match the two Surya slots in the example llama.cpp router profile.
-max_concurrency = 2
-pages_per_request = 2
-# Surya's own full-page budget and recognition resolution. For Chandra use
-# model = "chandra", profile = "chandra", max_output_tokens = 12384 and dpi = 120.
-max_output_tokens = 12288
-dpi = 192
-
-[llm]
-base_url = "https://openrouter.ai/api/v1"
-model = "z-ai/glm-5.3-flash"
-api_key_env = "OPENROUTER_API_KEY"
-max_concurrency = 1

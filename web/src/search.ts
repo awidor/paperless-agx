@@ -51,7 +51,7 @@ export function useSearch(query: string, filters: SearchFilters, run: number): S
     const exact = exactText(query);
     if (exact) {
       setState({ mode: "exact", status: "running", text: exact });
-      searchDocuments({ query: exact, exact: true, page: 1, page_size: 50, ...limits }, controller.signal)
+      searchDocuments({ query: exact, exact: true, semantic: true, summaries: true, page: 1, page_size: 50, ...limits }, controller.signal)
         .then((response) => setState({
           mode: "exact",
           status: "done",

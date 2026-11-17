@@ -10,7 +10,6 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
-use paperless_ingest::embed_pending_chunks;
 use paperless_models::{
     AgentSearchRequest, Document, DocumentPageResult, DocumentPatch, DocumentQuery, DocumentSort,
     HealthResponse, IngestionStatus, MediaType, MetadataSource, PageInfo, PassageKind,
@@ -47,13 +46,8 @@ impl AgentProxy {
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
-        ocr_configured: true,
-        ocr_base_url: state.ocr.config().base_url.to_string(),
-        ocr_model: state.ocr.config().model.clone(),
-        metadata_model: state.ocr.metadata_model().to_owned(),
         embedding_configured: state.embeddings.is_some(),
         embedding_model: state.embedding_model.clone(),
-        agent_configured: state.agent.is_some(),
         scanner_configured: state.scanner.is_some(),
     })
 }
@@ -405,6 +399,12 @@ pub async fn search(
             .exact_candidates(&request.query, filter, 100)
             .await?;
         (exact, Vec::new())
+    } else if !request.semantic {
+        let lexical = state
+            .chunks
+            .lexical_candidates(&request.query, filter, 50)
+            .await?;
+        (lexical, Vec::new())
     } else {
         let embeddings = state.embeddings.as_ref().ok_or_else(|| {
             AppError::service_unavailable(anyhow::anyhow!("embedding model is not configured"))
@@ -421,6 +421,17 @@ pub async fn search(
             .vector_candidates(&query_embedding, filter, 50)
             .await?;
         (lexical, vector)
+    };
+    let (lexical, vector) = if request.summaries {
+        (lexical, vector)
+    } else {
+        let pages_only = |matches: Vec<ChunkMatch>| {
+            matches
+                .into_iter()
+                .filter(|candidate| !candidate.chunk.is_summary())
+                .collect::<Vec<_>>()
+        };
+        (pages_only(lexical), pages_only(vector))
     };
     let ranked = |matches: Vec<ChunkMatch>| {
         matches
@@ -504,9 +515,7 @@ pub async fn agent_search(
     State(state): State<AppState>,
     Json(request): Json<AgentSearchRequest>,
 ) -> Result<Response, AppError> {
-    let agent = state.agent.as_ref().ok_or_else(|| {
-        AppError::service_unavailable(anyhow::anyhow!("search agent is not configured"))
-    })?;
+    let agent = &state.agent;
     if request.query.trim().is_empty() {
         return Err(AppError::bad_request(anyhow::anyhow!(
             "search query must not be empty"
@@ -636,38 +645,6 @@ pub async fn retry_document(
         .get(document_id)
         .await?
         .context("document disappeared after retry")?;
-    Ok(Json(document))
-}
-
-pub async fn infer_document_metadata(
-    State(state): State<AppState>,
-    Path(document_id): Path<u64>,
-) -> Result<Json<Document>, AppError> {
-    let document = active_document(&state, document_id).await?;
-    match document.status {
-        IngestionStatus::Ready | IngestionStatus::Failed => {}
-        _ => {
-            return Err(AppError::bad_request(anyhow::anyhow!(
-                "document is still processing"
-            )));
-        }
-    }
-    let page_rows = state.pages.list(document_id).await?;
-    let known_senders = state.documents.senders().await?;
-    let inferred = state
-        .ocr
-        .infer_metadata(page_rows, &known_senders)
-        .await
-        .map_err(AppError::bad_request)?;
-    let document = state
-        .metadata
-        .apply_inferred(document_id, inferred)
-        .await
-        .map_err(AppError::bad_request)?;
-    if let Some(embeddings) = &state.embeddings {
-        // A new summary passage is stored without a vector.
-        embed_pending_chunks(&state.chunks, embeddings).await?;
-    }
     Ok(Json(document))
 }
 

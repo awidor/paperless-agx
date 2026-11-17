@@ -134,22 +134,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{id}/infer-metadata": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["inferDocumentMetadata"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/search": {
         parameters: {
             query?: never;
@@ -312,6 +296,16 @@ export interface components {
              * @default false
              */
             exact: boolean;
+            /**
+             * @description Search by meaning with embeddings as well as by keywords. Ignored for exact searches.
+             * @default true
+             */
+            semantic: boolean;
+            /**
+             * @description Include the documents' summary passages.
+             * @default true
+             */
+            summaries: boolean;
         };
         /**
          * @description page: text from a page; summary: the document's AI summary, which has no place on a page.
@@ -402,13 +396,8 @@ export interface components {
         };
         HealthResponse: {
             status: string;
-            ocr_configured: boolean;
-            ocr_base_url: string;
-            ocr_model: string;
-            metadata_model: string;
             embedding_configured: boolean;
             embedding_model: string;
-            agent_configured: boolean;
             scanner_configured: boolean;
         };
     };
@@ -671,28 +660,6 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Retried */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Document"];
-                };
-            };
-        };
-    };
-    inferDocumentMetadata: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Metadata inferred */
             200: {
                 headers: {
                     [name: string]: unknown;

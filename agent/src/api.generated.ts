@@ -134,22 +134,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{id}/infer-metadata": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["inferDocumentMetadata"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/search": {
         parameters: {
             query?: never;
@@ -177,6 +161,23 @@ export interface paths {
         put?: never;
         /** @description Runs the search agent. Responds with server-sent events: `progress` (AgentProgress) while it looks things up, then one `result` (AgentSearchResult) or `error` (AgentError). */
         post: operations["agentSearch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Scans from the configured printer (A4) and adds every page scanned as one PDF document. Responds with server-sent events: `progress` (ScanProgress) after each page, then one `result` (ScanResult) or `error` (ScanError). The scan finishes even if the client disconnects. */
+        post: operations["scan"];
         delete?: never;
         options?: never;
         head?: never;
@@ -295,6 +296,16 @@ export interface components {
              * @default false
              */
             exact: boolean;
+            /**
+             * @description Search by meaning with embeddings as well as by keywords. Ignored for exact searches.
+             * @default true
+             */
+            semantic: boolean;
+            /**
+             * @description Include the documents' summary passages.
+             * @default true
+             */
+            summaries: boolean;
         };
         /**
          * @description page: text from a page; summary: the document's AI summary, which has no place on a page.
@@ -354,15 +365,40 @@ export interface components {
         AgentError: {
             message: string;
         };
+        /**
+         * @description `auto` uses the feeder when paper is in it, else the glass.
+         * @enum {string}
+         */
+        ScanSource: "auto" | "feeder" | "glass";
+        /** @enum {string} */
+        ScanMode: "color" | "gray" | "black_white";
+        ScanRequest: {
+            /** @default auto */
+            source: components["schemas"]["ScanSource"];
+            /** @default gray */
+            mode: components["schemas"]["ScanMode"];
+            /**
+             * @default 300
+             * @enum {integer}
+             */
+            dpi: 150 | 200 | 300 | 600;
+        };
+        ScanProgress: {
+            /** @description Pages scanned so far. */
+            pages: number;
+        };
+        ScanResult: {
+            document: components["schemas"]["Document"];
+            pages: number;
+        };
+        ScanError: {
+            message: string;
+        };
         HealthResponse: {
             status: string;
-            ocr_configured: boolean;
-            ocr_base_url: string;
-            ocr_model: string;
-            metadata_model: string;
             embedding_configured: boolean;
             embedding_model: string;
-            agent_configured: boolean;
+            scanner_configured: boolean;
         };
     };
     responses: never;
@@ -634,28 +670,6 @@ export interface operations {
             };
         };
     };
-    inferDocumentMetadata: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Metadata inferred */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Document"];
-                };
-            };
-        };
-    };
     search: {
         parameters: {
             query?: never;
@@ -703,6 +717,51 @@ export interface operations {
                 };
             };
             /** @description The search agent is not configured or unreachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    scan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScanRequest"];
+            };
+        };
+        responses: {
+            /** @description Scan events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description Unsupported resolution */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A scan is already running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No scanner is configured */
             503: {
                 headers: {
                     [name: string]: unknown;

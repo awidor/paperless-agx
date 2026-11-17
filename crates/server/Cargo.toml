@@ -16,7 +16,6 @@ infer.workspace = true
 paperless-embeddings = { path = "../embeddings" }
 paperless-ingest = { path = "../ingest" }
 paperless-models = { path = "../models" }
-paperless-ocr-client = { path = "../ocr-client" }
 paperless-scanner = { path = "../scanner" }
 paperless-search = { path = "../search" }
 paperless-storage = { path = "../storage" }

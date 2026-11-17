@@ -2,7 +2,7 @@
  * Scores the search agent on a set of queries with known answers.
  *
  *   bun src/eval.ts <queries.json> [--model id] [--reasoning level] [--providers a,b]
- *                   [--concurrency 4] [--repeat 1] [--json out.json]
+ *                   [--no-semantic] [--no-summaries] [--concurrency 4] [--repeat 1] [--json out.json]
  *
  * queries.json: [{ "query": "...", "expected": [document ids], "answer": true | false, "facts": ["regex"] }]
  * A query scores the share of its expected documents that appear in the top 5.
@@ -10,6 +10,8 @@
  * answer, false when it asks for documents and the answer must stay empty.
  * "facts" is optional: patterns (case-insensitive) the answer must all contain.
  * An answer that names its source ("laut …", "according to …") is flagged: the citations do that.
+ * --no-semantic searches by keywords only, without embeddings; --no-summaries leaves the
+ * documents' summaries out of search and listings. Both measure what those parts add.
  * --repeat runs every query that many times, since one run of a model varies.
  * --json writes every query's results and answer, for comparing runs side by side.
  */
@@ -49,6 +51,8 @@ const { values, positionals } = parseArgs({
     model: { type: "string" },
     reasoning: { type: "string" },
     providers: { type: "string" },
+    "no-semantic": { type: "boolean", default: false },
+    "no-summaries": { type: "boolean", default: false },
     concurrency: { type: "string", default: "4" },
     repeat: { type: "string", default: "1" },
     json: { type: "string" },
@@ -57,7 +61,7 @@ const { values, positionals } = parseArgs({
 });
 if (positionals.length !== 1) {
   console.error(
-    "usage: bun src/eval.ts <queries.json> [--model id] [--reasoning level] [--providers a,b] [--concurrency n] [--repeat n] [--json out.json]",
+    "usage: bun src/eval.ts <queries.json> [--model id] [--reasoning level] [--providers a,b] [--no-semantic] [--no-summaries] [--concurrency n] [--repeat n] [--json out.json]",
   );
   process.exit(2);
 }
@@ -68,6 +72,8 @@ const runtime = createRuntime(config, {
   modelId: values.model,
   reasoning: values.reasoning as ThinkingLevel | undefined,
   providers: values.providers?.split(",").map((provider) => provider.trim()).filter(Boolean),
+  semantic: !values["no-semantic"],
+  summaries: !values["no-summaries"],
 });
 
 function recall(found: number[], expected: number[]): number {
@@ -141,7 +147,8 @@ function mark(value: boolean | null): string {
 
 const model = values.model ?? config.model.id;
 const reasoning = runtime.reasoning;
-console.log(`model ${model} on ${reasoning} · recall in the top ${TOP}\n`);
+const variant = [values["no-semantic"] ? "keywords only" : null, values["no-summaries"] ? "no summaries" : null].filter(Boolean);
+console.log(`model ${model} on ${reasoning}${variant.length ? ` (${variant.join(", ")})` : ""} · recall in the top ${TOP}\n`);
 console.log("recall  answer  facts   extra  seconds   cost     query");
 for (const item of scores) {
   const failure = item.error ? `  (${item.error})` : item.attributed ? "  (the answer names its source)" : "";
@@ -171,4 +178,4 @@ console.log(
   `answered when it should ${tally("answered")} · facts right ${tally("correct")} · ${attributed} name their source · ${extra.toFixed(1)} unexpected documents in the top ${TOP}`,
 );
 console.log(`served by ${providers}`);
-if (values.json) await Bun.write(values.json, JSON.stringify({ model, reasoning, scores }, null, 2));
+if (values.json) await Bun.write(values.json, JSON.stringify({ model, reasoning, variant, scores }, null, 2));

@@ -7,7 +7,6 @@ use std::{
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageFormat, ImageReader};
 use paperless_models::{Document, MediaType};
-use paperless_ocr_client::PageImage;
 use paperless_storage::DataLayout;
 use tokio::{process::Command, sync::Semaphore};
 
@@ -19,9 +18,8 @@ pub struct PreviewService {
     layout: DataLayout,
     render_gate: Arc<Semaphore>,
     eager_thumbnail_pages: u32,
-    max_ocr_batch_pages: usize,
-    /// Resolution PDF pages are rendered at for OCR and for the page viewer.
-    ocr_dpi: u32,
+    /// Resolution PDF pages are rendered at for the indexing agent and the page viewer.
+    page_dpi: u32,
 }
 
 impl PreviewService {
@@ -29,28 +27,20 @@ impl PreviewService {
         layout: DataLayout,
         render_concurrency: usize,
         eager_thumbnail_pages: u32,
-        max_ocr_batch_pages: usize,
-        ocr_dpi: u32,
+        page_dpi: u32,
     ) -> Result<Self> {
         if render_concurrency == 0 {
             bail!("render_concurrency must be greater than zero");
         }
-        if max_ocr_batch_pages == 0 {
-            bail!("max_ocr_batch_pages must be greater than zero");
-        }
-        if ocr_dpi == 0 {
-            bail!("ocr_dpi must be greater than zero");
+        if page_dpi == 0 {
+            bail!("page_dpi must be greater than zero");
         }
         Ok(Self {
             layout,
             render_gate: Arc::new(Semaphore::new(render_concurrency)),
             eager_thumbnail_pages,
-            max_ocr_batch_pages,
-            ocr_dpi,
+            page_dpi,
         })
-    }
-    pub const fn max_ocr_batch_pages(&self) -> usize {
-        self.max_ocr_batch_pages
     }
 
     pub async fn prepare(&self, document: &Document) -> Result<u32> {
@@ -84,9 +74,9 @@ impl PreviewService {
         Ok(target)
     }
 
-    /// Full page render at OCR resolution, cached on disk. OCR block
-    /// coordinates are normalized against exactly this image, so crops taken
-    /// from it line up with the layout the OCR saw.
+    /// Full page render at page resolution, cached on disk. The indexing agent reads
+    /// this image and normalizes block coordinates against it, so crops taken from it
+    /// line up with the layout the agent saw.
     pub async fn ensure_page_image(&self, document: &Document, page: u32) -> Result<PathBuf> {
         if page == 0 || (document.page_count != 0 && page > document.page_count) {
             bail!("page {page} is outside document page range");
@@ -105,7 +95,7 @@ impl PreviewService {
             MediaType::Image => load_image(source).await?,
             MediaType::Pdf => {
                 let rendered =
-                    render_pdf_page(&self.layout, &source, page, Some(self.ocr_dpi), None).await?;
+                    render_pdf_page(&self.layout, &source, page, Some(self.page_dpi), None).await?;
                 let image = load_image(rendered.clone()).await?;
                 tokio::fs::remove_file(rendered)
                     .await
@@ -119,84 +109,6 @@ impl PreviewService {
             .context("create page image directory")?;
         save_webp_atomic(image, directory, target.clone()).await?;
         Ok(target)
-    }
-
-    pub async fn render_ocr_batch(
-        &self,
-        document: &Document,
-        first_page: u32,
-        page_count: u32,
-    ) -> Result<Vec<PageImage>> {
-        if first_page == 0 || page_count == 0 {
-            bail!("OCR page range must start at one and contain at least one page");
-        }
-        if page_count as usize > self.max_ocr_batch_pages {
-            bail!(
-                "OCR page batch has {page_count} pages, configured maximum is {}",
-                self.max_ocr_batch_pages
-            );
-        }
-        let last_page = first_page
-            .checked_add(page_count - 1)
-            .context("OCR page range overflows")?;
-        if document.page_count != 0 && last_page > document.page_count {
-            bail!("OCR page range ends after the document");
-        }
-        let _permit = self
-            .render_gate
-            .acquire()
-            .await
-            .context("preview render gate closed")?;
-        let source = self.layout.object_path(&document.content_hash);
-        match document.media_type {
-            MediaType::Image => {
-                if first_page != 1 || page_count != 1 {
-                    bail!("an image document has exactly one page");
-                }
-                let bytes = tokio::fs::read(source)
-                    .await
-                    .context("read image for OCR")?;
-                let media_type = image_media_type(&bytes)?;
-                Ok(vec![PageImage {
-                    page: 1,
-                    media_type,
-                    bytes,
-                }])
-            }
-            MediaType::Pdf => {
-                let mut pages = Vec::with_capacity(page_count as usize);
-                for page in first_page..=last_page {
-                    let path =
-                        render_pdf_page(&self.layout, &source, page, Some(self.ocr_dpi), None)
-                            .await?;
-                    let bytes = tokio::fs::read(&path)
-                        .await
-                        .context("read rendered OCR page")?;
-                    tokio::fs::remove_file(&path)
-                        .await
-                        .context("remove rendered OCR page")?;
-                    pages.push(PageImage {
-                        page,
-                        media_type: "image/png".into(),
-                        bytes,
-                    });
-                }
-                Ok(pages)
-            }
-        }
-    }
-    pub fn render_ocr_batch_owned(
-        &self,
-        document: Document,
-        first_page: u32,
-        page_count: u32,
-    ) -> impl Future<Output = Result<Vec<PageImage>>> + Send + 'static {
-        let service = self.clone();
-        async move {
-            service
-                .render_ocr_batch(&document, first_page, page_count)
-                .await
-        }
     }
 
     async fn generate_thumbnail(&self, document: &Document, page: u32) -> Result<()> {
@@ -346,16 +258,4 @@ async fn render_pdf_page(
         bail!("pdftoppm did not create page {page}");
     }
     Ok(rendered)
-}
-
-fn image_media_type(bytes: &[u8]) -> Result<String> {
-    let format = image::guess_format(bytes).context("detect image type for OCR")?;
-    let media_type = match format {
-        ImageFormat::Png => "image/png",
-        ImageFormat::Jpeg => "image/jpeg",
-        ImageFormat::Tiff => "image/tiff",
-        ImageFormat::WebP => "image/webp",
-        other => bail!("unsupported OCR image format: {other:?}"),
-    };
-    Ok(media_type.into())
 }

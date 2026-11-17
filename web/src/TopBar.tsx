@@ -8,9 +8,7 @@ import { Spinner } from "./ui";
 function HealthNotice({ health }: { health: HealthResponse | null }) {
   if (!health) return null;
   const missing = [
-    !health.ocr_configured && `OCR (${health.ocr_model || "no model"})`,
     !health.embedding_configured && `search embeddings (${health.embedding_model || "no model"})`,
-    health.agent_configured === false && "the search agent",
   ].filter((part): part is string => Boolean(part));
   if (missing.length === 0) return null;
   return <p className="health" title={`Not configured: ${missing.join(", ")}`}>

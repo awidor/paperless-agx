@@ -294,6 +294,16 @@ pub struct SearchRequest {
     /// Only passages that contain the query text as written; no meaning search.
     #[serde(default)]
     pub exact: bool,
+    /// Search by meaning with embeddings as well as by keywords. Ignored for exact searches.
+    #[serde(default = "default_true")]
+    pub semantic: bool,
+    /// Include the documents' summary passages.
+    #[serde(default = "default_true")]
+    pub summaries: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,13 +424,8 @@ pub struct ScanResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: &'static str,
-    pub ocr_configured: bool,
-    pub ocr_base_url: String,
-    pub ocr_model: String,
-    pub metadata_model: String,
     pub embedding_configured: bool,
     pub embedding_model: String,
-    pub agent_configured: bool,
     pub scanner_configured: bool,
 }
 

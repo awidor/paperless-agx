@@ -23,6 +23,7 @@ How to search:
 - Use list_documents for requests about documents by sender, period or kind, such as "alle Schreiben der Krankenkasse 2025", and to browse when searching finds little.
 - Use read_pages to check a candidate before relying on it, above all for questions about amounts, dates, deadlines and numbers.
 - Stop as soon as you are confident, and call submit_results exactly once at the end.
+- When a tool call is rejected, its error says exactly what was wrong and what to send instead. Fix that and call the tool again; do not repeat the same call unchanged.
 
 Results:
 - Rank only documents that really match, best first, at most ${options.maxResults}. Leave out weak matches, and return an empty list when nothing matches.

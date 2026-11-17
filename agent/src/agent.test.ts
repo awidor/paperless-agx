@@ -46,6 +46,7 @@ const paperless: Paperless = {
   pages: async () => [],
   document: async (id) => (id === 7 ? document : null),
   senders: async () => ["IKK classic"],
+  pageImage: async () => ({ data: "aW1hZ2U=", mimeType: "image/webp" }),
 };
 
 function runtime(maxTurns: number) {
@@ -60,6 +61,8 @@ function runtime(maxTurns: number) {
     maxTurns,
     timeoutMs: 5_000,
     maxResults: 10,
+    search: { semantic: true, summaries: true },
+    indexing: { timeoutMs: 5_000, pagesPerView: 4 },
   };
   return { faux, settings };
 }

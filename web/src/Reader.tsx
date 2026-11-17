@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronLeft, ChevronRight, Download, RefreshCw, Save, Sparkles, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Download, RefreshCw, Save, Trash2, X } from "lucide-react";
 import {
   deleteDocument,
   getDocument,
   getPages,
-  inferDocumentMetadata,
   patchDocument,
   retryDocument,
   type Document,
@@ -160,23 +159,6 @@ export function Reader({ documentId, initialPage, marks, marksPage, senders, onP
     }
   }
 
-  async function infer() {
-    setBusy(true);
-    try {
-      const updated = await inferDocumentMetadata(documentId);
-      setDocument(updated);
-      setTitle(updated.title || "");
-      setSender(updated.sender || "");
-      setCreatedAt(updated.created_at?.slice(0, 10) || "");
-      setEdited(false);
-      setError("");
-      onChanged();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "AI metadata failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   function finishClose() {
     onDirtyChange(false);
@@ -325,7 +307,6 @@ export function Reader({ documentId, initialPage, marks, marksPage, senders, onP
           <div className="actions">
             <a className="action" href={`/api/documents/${documentId}/file`} download={document.filename}><Download size={16} aria-hidden="true" /> Download original</a>
             {(document.status === "READY" || document.status === "FAILED") && <>
-              <button type="button" className="action" disabled={busy} onClick={() => void infer()}><Sparkles size={16} aria-hidden="true" /> Run AI metadata</button>
               <button type="button" className="action" disabled={busy} onClick={() => void retry()}><RefreshCw size={16} aria-hidden="true" /> Reprocess document</button>
             </>}
             <button type="button" className="action action--danger" disabled={busy} onClick={() => void remove()}><Trash2 size={16} aria-hidden="true" /> Delete document</button>
