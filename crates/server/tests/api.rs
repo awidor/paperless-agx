@@ -582,6 +582,100 @@ async fn health_upload_duplicate_read_and_image_preview_work() {
 }
 
 #[tokio::test]
+async fn document_assets_revalidate_and_send_their_exact_lengths() {
+    let temporary = tempfile::tempdir().unwrap();
+    let app = build_app(config(temporary.path(), start_agent().await))
+        .await
+        .unwrap();
+    let (_, uploaded) = upload(&app, "scan.png", "image/png", &png(), "Scan").await;
+    wait_for_ocr(&app, uploaded.document_id).await;
+
+    let mut original_etag = None;
+    for asset in ["file", "thumbnails/1", "pages/1/image"] {
+        let path = format!("/api/documents/{}/{asset}", uploaded.document_id);
+        let response = app
+            .clone()
+            .oneshot(Request::get(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{asset}");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-cache"
+        );
+        let etag = response.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let length: usize = response.headers()[header::CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.len(), length, "{asset}");
+
+        // A star inside an opaque entity tag is ordinary data.
+        let stale = app
+            .clone()
+            .oneshot(
+                Request::get(&path)
+                    .header(header::IF_NONE_MATCH, "\"old,*,tag\"")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::OK, "{asset}");
+
+        let weak_match = format!("W/{}", etag.trim_start_matches("W/"));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(&path)
+                    .header(header::IF_NONE_MATCH, format!("\"old,tag\", {weak_match}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{asset}");
+        assert_eq!(response.headers()[header::ETAG], etag);
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+
+        if asset == "file" {
+            original_etag = Some(etag);
+        }
+    }
+
+    let document = format!("/api/documents/{}", uploaded.document_id);
+    let deleted = app
+        .clone()
+        .oneshot(Request::delete(&document).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let response = app
+        .oneshot(
+            Request::get(format!("{document}/file"))
+                .header(header::IF_NONE_MATCH, original_etag.unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn startup_resumes_a_stored_image() {
     let temporary = tempfile::tempdir().unwrap();
     let layout = DataLayout::create(temporary.path()).await.unwrap();

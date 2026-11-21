@@ -1,11 +1,16 @@
-use std::{collections::HashMap, io, time::Duration};
+use std::{
+    collections::HashMap,
+    io,
+    path::PathBuf,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result};
 use axum::{
     Json,
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
@@ -17,8 +22,8 @@ use paperless_models::{
     UploadMetadata,
 };
 use paperless_search::{RankedChunk, collapse_to_documents, reciprocal_rank_fusion};
-use paperless_storage::{ChunkMatch, SearchFilter, StoredObject};
-use tokio::io::AsyncReadExt;
+use paperless_storage::{ChunkMatch, SearchFilter, StoredObject, hash_hex};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 use url::Url;
 
@@ -558,16 +563,13 @@ pub async fn openapi() -> Json<serde_json::Value> {
 pub async fn get_file(
     State(state): State<AppState>,
     Path(document_id): Path<u64>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let document = active_document(&state, document_id).await?;
     stream_file(
         state.objects.path(&document.content_hash),
-        match document.media_type {
-            MediaType::Pdf => "application/pdf",
-            MediaType::Image => {
-                image_mime_from_path(&state.objects.path(&document.content_hash)).await?
-            }
-        },
+        FileAsset::Original(&document),
+        &headers,
     )
     .await
 }
@@ -607,6 +609,7 @@ pub async fn get_pages(
 pub async fn get_thumbnail(
     State(state): State<AppState>,
     Path((document_id, page)): Path<(u64, u32)>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let document = active_document(&state, document_id).await?;
     let path = state
@@ -614,12 +617,13 @@ pub async fn get_thumbnail(
         .ensure_thumbnail(&document, page)
         .await
         .map_err(AppError::bad_request)?;
-    stream_file(path, "image/webp").await
+    stream_file(path, FileAsset::Preview, &headers).await
 }
 
 pub async fn get_page_image(
     State(state): State<AppState>,
     Path((document_id, page)): Path<(u64, u32)>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let document = active_document(&state, document_id).await?;
     let path = state
@@ -627,7 +631,7 @@ pub async fn get_page_image(
         .ensure_page_image(&document, page)
         .await
         .map_err(AppError::bad_request)?;
-    stream_file(path, "image/webp").await
+    stream_file(path, FileAsset::Preview, &headers).await
 }
 
 pub async fn retry_document(
@@ -740,17 +744,77 @@ async fn active_document(state: &AppState, document_id: u64) -> Result<Document,
         })
 }
 
+enum FileAsset<'a> {
+    Original(&'a Document),
+    Preview,
+}
+
+fn matches_if_none_match(headers: &HeaderMap, etag: Option<&str>) -> bool {
+    fn opaque_tag(tag: &[u8]) -> &[u8] {
+        tag.strip_prefix(b"W/").unwrap_or(tag)
+    }
+    let expected = etag.map(|tag| opaque_tag(tag.as_bytes()));
+    headers.get_all(header::IF_NONE_MATCH).iter().any(|value| {
+        let value = value.as_bytes().trim_ascii();
+        if value == b"*" {
+            return true;
+        }
+        // Commas delimit tags only outside the quoted opaque value.
+        let mut quoted = false;
+        value
+            .split(|&byte| {
+                if byte == b'"' {
+                    quoted = !quoted;
+                }
+                byte == b',' && !quoted
+            })
+            .any(|tag| Some(opaque_tag(tag.trim_ascii())) == expected)
+    })
+}
+
 async fn stream_file(
-    path: impl AsRef<std::path::Path>,
-    content_type: &str,
+    path: PathBuf,
+    asset: FileAsset<'_>,
+    headers: &HeaderMap,
 ) -> Result<Response, AppError> {
-    let file = tokio::fs::File::open(path.as_ref())
+    let mut file = tokio::fs::File::open(&path)
         .await
-        .with_context(|| format!("open file {}", path.as_ref().display()))?;
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from_stream(ReaderStream::new(file)))
+        .with_context(|| format!("open file {}", path.display()))?;
+    let metadata = file.metadata().await?;
+    let length = metadata.len();
+    let etag = match asset {
+        FileAsset::Original(document) => Some(format!("\"{}\"", hash_hex(&document.content_hash))),
+        // A preview can be regenerated with another renderer or DPI.
+        FileAsset::Preview => metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|modified| format!("W/\"{:x}-{length:x}\"", modified.as_nanos())),
+    };
+
+    // Revalidate even fresh copies so a deletion is checked by active_document.
+    let mut response = Response::builder().header(header::CACHE_CONTROL, "private, no-cache");
+    if let Some(etag) = &etag {
+        response = response.header(header::ETAG, etag);
+    }
+    let response = if matches_if_none_match(headers, etag.as_deref()) {
+        response
+            .status(StatusCode::NOT_MODIFIED)
+            .body(Body::empty())
+    } else {
+        let content_type = match asset {
+            FileAsset::Original(document) if document.media_type == MediaType::Pdf => {
+                "application/pdf"
+            }
+            FileAsset::Original(_) => image_mime(&mut file).await?,
+            FileAsset::Preview => "image/webp",
+        };
+        response
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_LENGTH, length)
+            .body(Body::from_stream(ReaderStream::new(file)))
+    };
+    response
         .context("build file response")
         .map_err(AppError::internal)
 }
@@ -764,10 +828,10 @@ fn detect_media_type(prefix: &[u8]) -> Result<MediaType> {
     }
 }
 
-async fn image_mime_from_path(path: &std::path::Path) -> Result<&'static str, AppError> {
-    let mut file = tokio::fs::File::open(path).await?;
+async fn image_mime(file: &mut tokio::fs::File) -> Result<&'static str, AppError> {
     let mut prefix = [0_u8; 512];
     let read = file.read(&mut prefix).await?;
+    file.rewind().await?;
     let kind = infer::get(&prefix[..read]).ok_or_else(|| {
         AppError::internal(anyhow::anyhow!("stored image type is not recognized"))
     })?;

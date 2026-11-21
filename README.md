@@ -1,6 +1,6 @@
 # Paperless-AGX
 
-Document OCR and agentic search with page references. Rust, React, SQLite, and a TypeScript search agent built on [Pi](https://github.com/earendil-works/pi).
+Document OCR and agentic search with page references. Rust, SolidJS, SQLite, and a TypeScript search agent built on [Pi](https://github.com/earendil-works/pi).
 
 ## Setup
 
@@ -66,4 +66,4 @@ bunx playwright install chromium
 bun run test:e2e
 ```
 
-MIT. The indexing prompt's block content rules are adapted from the Chandra OCR prompt, which retains its upstream license in `licenses/chandra.txt`.
+MIT. The indexing prompt's block content rules are adapted from the Chandra OCR prompt, which retains its upstream license in `licenses/chandra.txt`. The inlined Lucide icons are covered by `licenses/lucide.txt`.
