@@ -11,7 +11,7 @@ use std::{fmt, io::Cursor};
 use image::{DynamicImage, GrayImage, ImageFormat, RgbImage, codecs::jpeg::JpegEncoder};
 pub use paperless_models::{ScanMode, ScanSource};
 pub use protocol::ScannerInfo;
-use protocol::{Connection, SOURCE_FEEDER, SOURCE_GLASS, Window, dpi_code};
+use protocol::{Connection, SOURCE_DUPLEX, SOURCE_FEEDER, SOURCE_GLASS, Window, dpi_code};
 
 pub const DEFAULT_PORT: u16 = 9400;
 /// The resolutions offered for scanning.
@@ -35,6 +35,7 @@ pub enum ScanError {
     CoverOpen,
     CancelledAtPrinter,
     UnsupportedDpi(u16),
+    UnsupportedDuplex,
     Connection(std::io::Error),
     Protocol(String),
 }
@@ -60,6 +61,9 @@ impl fmt::Display for ScanError {
             Self::CoverOpen => f.write_str("The scanner lid or the feeder cover is open."),
             Self::CancelledAtPrinter => f.write_str("The scan was cancelled at the printer."),
             Self::UnsupportedDpi(dpi) => write!(f, "The scanner does not scan at {dpi} dpi."),
+            Self::UnsupportedDuplex => {
+                f.write_str("This scanner does not support dual-sided scanning.")
+            }
             Self::Connection(error) => write!(f, "The connection to the scanner broke: {error}."),
             Self::Protocol(detail) => write!(f, "The scanner sent something unexpected: {detail}."),
         }
@@ -72,6 +76,7 @@ impl std::error::Error for ScanError {}
 pub struct ScanSettings {
     pub source: ScanSource,
     pub dpi: u16,
+    pub duplex: bool,
 }
 
 /// One scanned page as the scanner sent it: color JPEG strips from top to bottom.
@@ -82,10 +87,12 @@ pub struct RawPage {
     /// The scan window in pixels; strips are padded wider than it.
     width: u32,
     height: u32,
+    /// Reversing feeders turn sheets head-to-foot for the back side, so back pages arrive upside down.
+    rotate_180: bool,
 }
 
 impl RawPage {
-    /// The page as one image, cropped to the scan window.
+    /// The page as one image, cropped to the scan window and turned right-side up.
     pub fn image(&self) -> Result<RgbImage, ScanError> {
         let strips = self
             .strips
@@ -108,7 +115,12 @@ impl RawPage {
         }
         let width = self.width.min(full_width);
         let height = self.height.min(full_height);
-        Ok(image::imageops::crop_imm(&page, 0, 0, width, height).to_image())
+        let cropped = image::imageops::crop_imm(&page, 0, 0, width, height).to_image();
+        Ok(if self.rotate_180 {
+            image::imageops::rotate180(&cropped)
+        } else {
+            cropped
+        })
     }
 }
 
@@ -153,6 +165,10 @@ impl Scanner {
             ScanSource::Feeder => return Err(ScanError::NoPaper),
             ScanSource::Glass => false,
         };
+        let duplex = feeder && settings.duplex;
+        if duplex && !info.has_duplex {
+            return Err(ScanError::UnsupportedDuplex);
+        }
         let max_length = if feeder {
             info.max_length_feeder
         } else {
@@ -162,7 +178,13 @@ impl Scanner {
             width: A4_WIDTH.min(info.max_width),
             length: A4_LENGTH.min(max_length),
             dpi_code: code,
-            source: if feeder { SOURCE_FEEDER } else { SOURCE_GLASS },
+            source: if duplex {
+                SOURCE_DUPLEX
+            } else if feeder {
+                SOURCE_FEEDER
+            } else {
+                SOURCE_GLASS
+            },
         };
         let pixels =
             |length: u32| (u64::from(length) * u64::from(settings.dpi)).div_ceil(1200) as u32;
@@ -186,11 +208,13 @@ impl Scanner {
                         break;
                     }
                 }
+                let back_side = duplex && pages.len() % 2 == 1;
                 pages.push(RawPage {
                     strips,
                     dpi: settings.dpi,
                     width,
                     height,
+                    rotate_180: back_side,
                 });
                 on_page(pages.len() as u32);
                 if !feeder {
@@ -272,7 +296,11 @@ mod tests {
     use crate::fake::{FakeScanner, FakeSetup};
 
     fn settings(source: ScanSource) -> ScanSettings {
-        ScanSettings { source, dpi: 150 }
+        ScanSettings {
+            source,
+            dpi: 150,
+            duplex: false,
+        }
     }
 
     #[tokio::test]
@@ -379,12 +407,87 @@ mod tests {
         let too_fine = ScanSettings {
             source: ScanSource::Glass,
             dpi: 1200,
+            duplex: false,
         };
         let error = scanner.scan(too_fine, |_| {}).await.unwrap_err();
         assert!(
             matches!(error, ScanError::UnsupportedDpi(1200)),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn duplex_feeder_scans_both_sides_and_rotates_back_pages() {
+        let fake = FakeScanner::start(FakeSetup {
+            feeder_sheets: 2,
+            ..FakeSetup::default()
+        })
+        .await;
+        let scanner = Scanner::new("127.0.0.1", fake.port());
+        let mut progress = Vec::new();
+        let pages = scanner
+            .scan(
+                ScanSettings {
+                    source: ScanSource::Feeder,
+                    dpi: 150,
+                    duplex: true,
+                },
+                |pages| progress.push(pages),
+            )
+            .await
+            .unwrap();
+        assert_eq!(progress, vec![1, 2, 3, 4]);
+        assert_eq!(fake.window().unwrap()[19], SOURCE_DUPLEX);
+        // Front sides keep strip 0 at the top; back sides are rotated 180 degrees so strip 1 moves to the top.
+        for (index, page) in pages.iter().enumerate() {
+            let image = page.image().unwrap();
+            let top = image.get_pixel(10, 4).0[0];
+            let bottom = image.get_pixel(10, 20).0[0];
+            let (expected_top, expected_bottom) = if index % 2 == 1 {
+                (fake.shade(index, 1), fake.shade(index, 0))
+            } else {
+                (fake.shade(index, 0), fake.shade(index, 1))
+            };
+            assert!(top.abs_diff(expected_top) < 8, "page {index} top");
+            assert!(bottom.abs_diff(expected_bottom) < 8, "page {index} bottom");
+        }
+    }
+
+    #[tokio::test]
+    async fn duplex_is_rejected_when_scanner_lacks_it_and_ignored_on_glass() {
+        let fake = FakeScanner::start(FakeSetup {
+            feeder_sheets: 1,
+            has_duplex: false,
+            ..FakeSetup::default()
+        })
+        .await;
+        let scanner = Scanner::new("127.0.0.1", fake.port());
+        let error = scanner
+            .scan(
+                ScanSettings {
+                    source: ScanSource::Feeder,
+                    dpi: 150,
+                    duplex: true,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ScanError::UnsupportedDuplex), "{error:?}");
+
+        let pages = scanner
+            .scan(
+                ScanSettings {
+                    source: ScanSource::Glass,
+                    dpi: 150,
+                    duplex: true,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(fake.window().unwrap()[19], SOURCE_GLASS);
     }
 
     #[tokio::test]

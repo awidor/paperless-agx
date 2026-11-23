@@ -267,6 +267,7 @@ async fn scan_into_library(
     let settings = paperless_scanner::ScanSettings {
         source: request.source,
         dpi: request.dpi,
+        duplex: request.duplex,
     };
     let pages = scanner
         .scan(settings, on_page)

@@ -944,6 +944,33 @@ async fn scan_streams_progress_and_adds_the_stack_as_one_pdf() {
 }
 
 #[tokio::test]
+async fn duplex_scan_adds_both_sides_of_each_feeder_sheet() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (app, fake) = app_with_scanner(
+        temporary.path(),
+        FakeSetup {
+            feeder_sheets: 2,
+            ..FakeSetup::default()
+        },
+    )
+    .await;
+
+    let (status, stream) = post_scan(
+        &app,
+        serde_json::json!({"source": "feeder", "mode": "gray", "dpi": 150, "duplex": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fake.window().unwrap()[19], 0x10);
+    let result = last_event(&stream, "result");
+    assert_eq!(result["pages"], 4);
+    let document_id = result["document"]["document_id"].as_u64().unwrap();
+    let document = wait_for_ocr(&app, document_id).await;
+    assert_eq!(document.media_type, MediaType::Pdf);
+    assert_eq!(document.page_count, 4);
+}
+
+#[tokio::test]
 async fn scan_reports_scanner_problems_and_rejects_bad_requests() {
     let temporary = tempfile::tempdir().unwrap();
     let (app, _fake) = app_with_scanner(temporary.path(), FakeSetup::default()).await;

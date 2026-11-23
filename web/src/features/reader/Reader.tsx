@@ -1,9 +1,9 @@
 import { action, createEffect, createMemo, createProjection, createSignal, For, onSettled, Show, useContext } from "solid-js";
-import { deleteDocument, patchDocument, retryDocument, type Document, type DocumentPatch, type OcrBlock } from "../../client/api";
+import { deleteDocument, patchDocument, retryDocument, type Document, type DocumentPatch } from "../../client/api";
 import { Alert, Thumbnail } from "../../components/ui";
 import { isProcessing } from "../../lib/format";
 import { createRevealMark } from "../../primitives/createRevealMark";
-import { EASE_OUT, motionAllowed } from "../../primitives/motion";
+import { motionAllowed } from "../../primitives/motion";
 import { AppContext } from "../../state/app";
 import { POLL_MS } from "../../state/library";
 import type { createReaderData } from "../../state/reader";
@@ -13,7 +13,6 @@ import { PageView } from "./PageView";
 import { ReaderMetadata } from "./ReaderMetadata";
 
 type Props = { page: number; marks?: string[]; marksPage?: number };
-const NO_BLOCKS: OcrBlock[] = [];
 
 type ContentProps = Props & {
   source: ReturnType<typeof createReaderData>;
@@ -30,13 +29,6 @@ export default function Reader(props: ContentProps) {
   const doc = () => props.document;
   const pages = () => props.source.data.pages;
   const page = () => props.page;
-  const current = createMemo(() => {
-    const number = page();
-    const pageList = pages();
-    const slot = pageList[number - 1];
-    return slot?.page === number ? slot : pageList.find((candidate) => candidate.page === number);
-  }, { name: "reader page data" });
-  const blocks = () => current()?.blocks ?? NO_BLOCKS;
   const activePage = createProjection<Record<number, true>>(() => ({ [page()]: true }), {}, { name: "active reader page" });
   const pageMarks = () => {
     const target = props.marksPage;
@@ -46,6 +38,9 @@ export default function Reader(props: ContentProps) {
 
   const tab = () => props.tab;
   let stage!: HTMLElement;
+  let scrollDrivenPage: number | null = null;
+  let jumpTarget: number | null = null;
+  let jumpTimer: number | undefined;
 
   const title = createMetadataDraft(() => doc().title ?? "", "document title draft");
   const sender = createMetadataDraft(() => doc().sender ?? "", "document sender draft");
@@ -57,9 +52,93 @@ export default function Reader(props: ContentProps) {
   const lifetime = new AbortController();
   const { signal } = lifetime;
 
+  function scrollRoot(): HTMLElement | undefined {
+    if (!stage) return undefined;
+    return getComputedStyle(stage).overflowY === "visible" ? (stage.parentElement ?? stage) : stage;
+  }
+
+  function clearJump() {
+    jumpTarget = null;
+    if (jumpTimer !== undefined) {
+      window.clearTimeout(jumpTimer);
+      jumpTimer = undefined;
+    }
+  }
+
+  function scrollToPage(targetPage: number, smooth: boolean) {
+    const scroller = scrollRoot();
+    if (!scroller) return;
+    const target = stage.querySelector<HTMLElement>(`[data-reader-page="${targetPage}"]`);
+    if (!target) return;
+    const padding = parseFloat(getComputedStyle(stage).paddingTop) || 0;
+    const top = targetPage === 1 && scroller === stage
+      ? 0
+      : Math.max(0, scroller.scrollTop + target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - padding);
+    if (smooth && motionAllowed()) {
+      clearJump();
+      jumpTarget = targetPage;
+      jumpTimer = window.setTimeout(clearJump, 900);
+      scroller.scrollTo({ top, behavior: "smooth" });
+    } else {
+      clearJump();
+      scroller.scrollTo({ top, behavior: "instant" });
+    }
+  }
+
   onSettled(() => {
     const unguard = props.guard(() => !busy() && (!dirty() || window.confirm("Discard your unsaved document changes?")));
-    return () => { unguard(); lifetime.abort(); };
+    const hosts = [stage, stage.parentElement].filter((element): element is HTMLElement => Boolean(element));
+    let frame = 0;
+
+    function syncVisiblePage() {
+      frame = 0;
+      if (jumpTarget !== null) return;
+      const scroller = scrollRoot();
+      if (!scroller) return;
+      const sheets = stage.querySelectorAll<HTMLElement>("[data-reader-page]");
+      if (sheets.length <= 1) return;
+      let bestPage = page();
+      if (scroller.scrollTop <= 2) {
+        bestPage = Number(sheets[0].dataset.readerPage) || 1;
+      } else if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) {
+        bestPage = Number(sheets[sheets.length - 1].dataset.readerPage) || bestPage;
+      } else {
+        const rootRect = scroller.getBoundingClientRect();
+        let bestVisible = -1;
+        for (const sheet of sheets) {
+          const rect = sheet.getBoundingClientRect();
+          const visible = Math.max(0, Math.min(rect.bottom, rootRect.bottom) - Math.max(rect.top, rootRect.top));
+          if (visible > bestVisible) {
+            bestVisible = visible;
+            bestPage = Number(sheet.dataset.readerPage) || bestPage;
+          }
+        }
+      }
+      if (bestPage !== page()) {
+        scrollDrivenPage = bestPage;
+        url.setDocumentPage(bestPage);
+      }
+    }
+
+    function onScroll() {
+      if (jumpTarget !== null || frame) return;
+      frame = requestAnimationFrame(syncVisiblePage);
+    }
+
+    for (const host of hosts) {
+      host.addEventListener("scroll", onScroll, { passive: true, signal });
+      host.addEventListener("scrollend", clearJump, { passive: true, signal });
+      for (const input of ["wheel", "touchstart", "pointerdown"]) {
+        host.addEventListener(input, clearJump, { passive: true, signal });
+      }
+    }
+
+    return () => {
+      cancelAnimationFrame(frame);
+      clearJump();
+      unguard();
+      lifetime.abort();
+    };
   });
 
   createEffect(
@@ -89,17 +168,17 @@ export default function Reader(props: ContentProps) {
   createEffect(
     () => ({ page: page(), tab: tab() }),
     (turn, previous) => {
-      stage.scrollTo({ top: 0 });
       document.getElementById(`reader-page-${turn.page}`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
-      const sheet = stage.querySelector<HTMLElement>(".reader__page");
-      if (!previous || !sheet || !motionAllowed()) return;
-      const offset = previous.tab !== turn.tab ? 0 : turn.page > previous.page ? 12 : -12;
-      const animation = sheet.animate([{ opacity: 0, transform: `translateX(${offset}px)` }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE_OUT });
-      return () => animation.cancel();
+      if (scrollDrivenPage === turn.page && previous?.tab === turn.tab) {
+        scrollDrivenPage = null;
+        return;
+      }
+      scrollDrivenPage = null;
+      scrollToPage(turn.page, Boolean(previous && previous.tab === turn.tab));
     },
     { name: "turn reader page" },
   );
-  createRevealMark(() => stage, () => pageMarks()?.length ? `${page()}-${tab()}` : null);
+  createRevealMark(scrollRoot, () => pageMarks()?.length ? `${page()}-${tab()}` : null);
 
   function received(document: Document) {
     props.source.received(document);
@@ -177,10 +256,25 @@ export default function Reader(props: ContentProps) {
       </nav>
       <section class="reader__stage" id="reader-view" role="tabpanel" aria-labelledby={tab() === "preview" ? "preview-tab" : "text-tab"} ref={stage}>
         <Show when={tab() === "text"} fallback={<div class="reader__page">
-          <PageView document={doc()} page={page()} blocks={blocks()} marks={pageMarks()} />
+          <PageView
+            document={doc()}
+            pages={pages()}
+            marks={props.marks}
+            marksPage={props.marksPage}
+            scrollRoot={scrollRoot}
+            onPagesReady={() => { if (page() > 1) scrollToPage(page(), false); }}
+          />
         </div>}>
-          <div class="reader__page">
-            <DigitalPage documentId={doc().document_id} page={current()} marks={pageMarks()} />
+          <div class="reader__page reader__sheets">
+            <Show when={pages().length > 0} fallback={
+              <div class="reader__sheet" data-reader-page={1}>
+                <DigitalPage documentId={doc().document_id} page={undefined} marks={undefined} />
+              </div>
+            }>
+              <For each={pages()}>{(item) => <div class="reader__sheet" data-reader-page={item.page}>
+                <DigitalPage documentId={doc().document_id} page={item} marks={props.marksPage === item.page ? props.marks : undefined} />
+              </div>}</For>
+            </Show>
           </div>
         </Show>
         <Show when={tab() === "preview"}><p class="reader__hint">Drag across the page text to select and copy it.</p></Show>

@@ -2,7 +2,7 @@ import { appUrl, expect, rendered, test } from "./fixtures/solid";
 import { documentFixtures, mockArchive } from "./fixtures/solidApi";
 
 test("resizing a PDF keeps the same text span and active selection", async ({ page, context }) => {
-  const pdf = { ...documentFixtures[0], media_type: "pdf" as const, page_count: 2 };
+  const pdf = { ...documentFixtures[0], media_type: "pdf" as const, page_count: 3 };
   await mockArchive(context, { documents: [pdf] });
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(`${appUrl}/?document=${pdf.document_id}`);
@@ -32,13 +32,13 @@ test("resizing a PDF keeps the same text span and active selection", async ({ pa
     };
   }, span)).toEqual({ sameSpan: true, anchorInSpan: true, focusInSpan: true, text: "Electricity statement" });
 
-  await reader.getByRole("button", { name: "Next page" }).click();
-  await expect(reader.locator(".text-layer").getByText("Statement page 2")).toBeVisible();
+  await reader.getByRole("button", { name: "Show page 3" }).click();
+  await expect(reader.locator(".text-layer").getByText("Statement page 3")).toBeVisible();
   await expect(text).toHaveCount(0);
   expect(await span.evaluate((element) => element.isConnected)).toBe(false);
 });
 
-test("a pending PDF text render uses the latest viewport and is cleaned up on page turn", async ({ page, context }) => {
+test("a pending PDF text render uses the latest viewport and is cleaned up when offscreen", async ({ page, context }) => {
   const pdf = { ...documentFixtures[0], media_type: "pdf" as const, page_count: 3 };
   await mockArchive(context, { documents: [pdf] });
   await page.goto(appUrl);
@@ -54,10 +54,6 @@ test("a pending PDF text render uses the latest viewport and is cleaned up on pa
       const { render, update, cancel } = prototype;
       prototype.render = function () {
         const number = ++log.renders;
-        if (number === 2) {
-          // Turn to page three before pdf.js consumes the queued text read on page two.
-          document.querySelector<HTMLButtonElement>('.reader [aria-label="Next page"]')!.click();
-        }
         const task = render.call(this);
         return number === 1 ? task.then(() => first.promise) : task;
       };
@@ -82,19 +78,17 @@ test("a pending PDF text render uses the latest viewport and is cleaned up on pa
   await expect(first).toHaveCount(1);
   await expect(first).toBeHidden();
   const firstSpan = await first.elementHandle();
-  const width = 520;
+  const width = 620;
   await reader.locator(".pdf-viewer").evaluate((viewer, width) => { viewer.style.width = `${width}px`; }, width);
-  await expect.poll(() => reader.locator(".pdf-canvas").evaluate((canvas) => canvas.style.width)).toBe(`${width}px`);
+  await expect.poll(() => reader.getByLabel("PDF page 1").evaluate((canvas) => canvas.style.width)).toBe(`${width}px`);
   expect(await lifecycle.evaluate(({ renders }) => renders)).toBe(1);
   await lifecycle.evaluate(({ finishFirst }) => finishFirst());
   await expect(first).toBeVisible();
   expect(await first.evaluate((element, original) => element === original, firstSpan)).toBe(true);
   expect(await lifecycle.evaluate(({ updates }) => updates.get("Electricity statement"))).toBeCloseTo(width / 600);
 
-  await reader.getByRole("button", { name: "Next page" }).click();
+  await reader.getByRole("button", { name: "Show page 3" }).click();
   await expect(layer.getByText("Statement page 3", { exact: true })).toBeVisible();
-  await expect(layer.getByText("Statement page 2", { exact: true })).toHaveCount(0);
-  expect(await lifecycle.evaluate(({ renders, cancelled }) => ({ renders, cancelled })))
-    .toEqual({ renders: 3, cancelled: ["Electricity statement", "Statement page 2"] });
-  await expect(reader.locator(".selection-highlight")).toHaveCount(1);
+  await expect(first).toHaveCount(0);
+  expect(await lifecycle.evaluate(({ cancelled }) => cancelled)).toContain("Electricity statement");
 });

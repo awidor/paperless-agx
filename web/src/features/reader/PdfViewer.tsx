@@ -1,6 +1,6 @@
-import { createEffect, createMemo, createSignal, Errored, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, Errored, For, onCleanup, onSettled, Show } from "solid-js";
 import type { PDFPageProxy, TextLayer } from "pdfjs-dist";
-import type { OcrBlock } from "../../client/api";
+import type { OcrBlock, PageInfo } from "../../client/api";
 import { EvidenceMarks } from "../../components/EvidenceMarks";
 import { Spinner } from "../../components/ui";
 import { markBoxes, type Run } from "../../lib/evidenceHighlight";
@@ -10,11 +10,57 @@ import { createElementSize, type ElementSize } from "../../primitives/createElem
 import { EASE_OUT, motionAllowed } from "../../primitives/motion";
 import { OcrTextLayer } from "./OcrTextLayer";
 
-type Props = { url: string; page: number; blocks: OcrBlock[]; marks?: string[] };
+const NO_BLOCKS: OcrBlock[] = [];
+const DEFAULT_ASPECT = 210 / 297;
+const OBSERVER_MARGIN = "200px 0px";
+
+type Props = {
+  url: string;
+  pageCount: number;
+  pages: PageInfo[];
+  marks?: string[];
+  marksPage?: number;
+  scrollRoot: () => HTMLElement | undefined;
+  onPagesReady?: () => void;
+};
+
 type Page = { file: Pdf; proxy: PDFPageProxy };
+type VisibilityObserver = { observe: (element: Element, onChange: (visible: boolean) => void) => () => void };
 
 function loadingPage() {
   return <p class="status-line" role="status"><Spinner /> Loading page</p>;
+}
+
+function createVisibilityObserver(root: () => HTMLElement | undefined): VisibilityObserver {
+  const callbacks = new Map<Element, (visible: boolean) => void>();
+  let observer: IntersectionObserver | undefined;
+
+  onSettled(() => {
+    if (typeof IntersectionObserver === "undefined") {
+      for (const notify of callbacks.values()) notify(true);
+      return;
+    }
+    observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) callbacks.get(entry.target)?.(entry.isIntersecting);
+    }, { root: root() ?? null, rootMargin: OBSERVER_MARGIN });
+    for (const element of callbacks.keys()) observer.observe(element);
+    return () => {
+      observer?.disconnect();
+      observer = undefined;
+    };
+  });
+
+  return {
+    observe(element, onChange) {
+      callbacks.set(element, onChange);
+      if (observer) observer.observe(element);
+      else if (typeof IntersectionObserver === "undefined") onChange(true);
+      return () => {
+        callbacks.delete(element);
+        observer?.unobserve(element);
+      };
+    },
+  };
 }
 
 export function PdfViewer(props: Props) {
@@ -29,13 +75,126 @@ export function PdfViewer(props: Props) {
   return <div class="pdf-viewer" ref={ref}>
     <Errored fallback={(error) => <p class="viewer-error">{String(error())}</p>}>
       <Show when={file()} fallback={loadingPage()}>{(pdf) =>
-        <PdfPage file={pdf()} page={props.page} blocks={props.blocks} marks={props.marks} size={size()} />
+        <PdfDocument
+          file={pdf()}
+          pageCount={Math.max(pdf().document.numPages, props.pageCount, 1)}
+          pages={props.pages}
+          marks={props.marks}
+          marksPage={props.marksPage}
+          size={size()}
+          scrollRoot={props.scrollRoot}
+          onReady={props.onPagesReady}
+        />
       }</Show>
     </Errored>
   </div>;
 }
 
-function PdfPage(props: { file: Pdf; size?: ElementSize; page: number; blocks: OcrBlock[]; marks?: string[] }) {
+function PdfDocument(props: {
+  file: Pdf;
+  pageCount: number;
+  pages: PageInfo[];
+  marks?: string[];
+  marksPage?: number;
+  size?: ElementSize;
+  scrollRoot: () => HTMLElement | undefined;
+  onReady?: () => void;
+}) {
+  const [defaultAspect, setDefaultAspect] = createSignal(DEFAULT_ASPECT, { name: "PDF default aspect" });
+  const visibility = createVisibilityObserver(props.scrollRoot);
+  const pageNumbers = createMemo(
+    () => Array.from({ length: props.pageCount }, (_, index) => index + 1),
+    { name: "PDF page numbers" },
+  );
+
+  function blocksFor(number: number): OcrBlock[] {
+    const slot = props.pages[number - 1];
+    const info = slot?.page === number ? slot : props.pages.find((candidate) => candidate.page === number);
+    return info?.blocks ?? NO_BLOCKS;
+  }
+
+  onSettled(() => {
+    props.onReady?.();
+  });
+
+  return <div class="pdf-pages">
+    <For each={pageNumbers()}>{(number) => <PdfPageSlot
+      file={props.file}
+      page={number}
+      size={props.size}
+      defaultAspect={defaultAspect()}
+      onAspect={(ratio) => { if (number === 1) setDefaultAspect(ratio); }}
+      blocks={blocksFor(number)}
+      marks={props.marksPage === number ? props.marks : undefined}
+      visibility={visibility}
+    />}</For>
+  </div>;
+}
+
+function PdfPageSlot(props: {
+  file: Pdf;
+  page: number;
+  size?: ElementSize;
+  defaultAspect: number;
+  onAspect: (ratio: number) => void;
+  blocks: OcrBlock[];
+  marks?: string[];
+  visibility: VisibilityObserver;
+}) {
+  let slot!: HTMLDivElement;
+  const [mounted, setMounted] = createSignal(false, { name: "PDF page mounted" });
+  const [measured, setMeasured] = createSignal<{ width: number; height: number } | undefined>(undefined, { name: "PDF page natural size" });
+
+  onSettled(() => props.visibility.observe(slot, setMounted));
+
+  const dimensions = createMemo(() => {
+    const containerWidth = props.size?.width;
+    if (!containerWidth) return undefined;
+    const base = measured();
+    if (base) {
+      const scale = Math.min(2, containerWidth / base.width);
+      return { width: Math.floor(base.width * scale), height: Math.floor(base.height * scale) };
+    }
+    const width = Math.floor(containerWidth);
+    return { width, height: Math.floor(width / props.defaultAspect) };
+  }, { name: "PDF slot dimensions" });
+
+  return <div
+    class="reader__sheet"
+    data-reader-page={props.page}
+    ref={slot}
+    style={dimensions() ? { "min-height": `${dimensions()!.height}px` } : undefined}
+  >
+    <Show when={mounted()} fallback={
+      <div
+        class="ocr-page-frame pdf-page-frame pdf-page-frame--placeholder"
+        style={dimensions() ? { width: `${dimensions()!.width}px`, height: `${dimensions()!.height}px` } : undefined}
+        aria-label={`PDF page ${props.page}`}
+      />
+    }>
+      <PdfPage
+        file={props.file}
+        page={props.page}
+        size={props.size}
+        blocks={props.blocks}
+        marks={props.marks}
+        onMeasured={(width, height) => {
+          setMeasured((previous) => (previous && previous.width === width && previous.height === height ? previous : { width, height }));
+          if (props.page === 1) props.onAspect(width / height);
+        }}
+      />
+    </Show>
+  </div>;
+}
+
+function PdfPage(props: {
+  file: Pdf;
+  size?: ElementSize;
+  page: number;
+  blocks: OcrBlock[];
+  marks?: string[];
+  onMeasured: (width: number, height: number) => void;
+}) {
   let canvas!: HTMLCanvasElement;
   let textContainer!: HTMLDivElement;
   let painted: PDFPageProxy | undefined;
@@ -57,7 +216,7 @@ function PdfPage(props: { file: Pdf; size?: ElementSize; page: number; blocks: O
     if (!width) return undefined;
     const { proxy } = current;
     const base = proxy.getViewport({ scale: 1 });
-    return { page: current, viewport: proxy.getViewport({ scale: Math.min(2, width / base.width) }) };
+    return { page: current, base, viewport: proxy.getViewport({ scale: Math.min(2, width / base.width) }) };
   }, { name: "PDF viewport" });
   const currentText = () => {
     const content = text();
@@ -73,6 +232,7 @@ function PdfPage(props: { file: Pdf; size?: ElementSize; page: number; blocks: O
 
   createEffect(viewport, (layout) => {
     if (!layout) return;
+    props.onMeasured(layout.base.width, layout.base.height);
     failPaint("");
     const { page: { file, proxy }, viewport } = layout;
     const ratio = window.devicePixelRatio || 1;
@@ -175,8 +335,8 @@ function PdfPage(props: { file: Pdf; size?: ElementSize; page: number; blocks: O
   const height = () => viewport() ? `${Math.floor(viewport()!.viewport.height)}px` : undefined;
   return <>
     <Show when={paintError()}>{(message) => <p class="viewer-error">{message()}</p>}</Show>
-    <p class="status-line" role="status" hidden={hasPainted() || Boolean(paintError())}><Spinner /> Loading page</p>
     <div class="ocr-page-frame pdf-page-frame" hidden={Boolean(paintError())} style={{ width: width(), height: height() }}>
+      <p class="status-line pdf-page-status" role="status" hidden={hasPainted() || Boolean(paintError())}><Spinner /> Loading page</p>
       <canvas ref={canvas} class="pdf-canvas" aria-label={`PDF page ${props.page}`} style={{ width: width(), height: height() }} />
       <Show when={evidence().length > 0}><div class="page-marks" aria-hidden="true"><EvidenceMarks boxes={evidence()} /></div></Show>
       <Show when={page()} keyed>{(current) =>

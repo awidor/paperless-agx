@@ -8,21 +8,29 @@ import { ScanLine, X } from "./Icons";
 import { Spinner } from "./ui";
 
 const storageKey = "paperless-agx-scan";
-const DEFAULTS: ScanRequest = { source: "auto", mode: "gray", dpi: 300 };
+const DEFAULTS: ScanRequest = { source: "auto", mode: "gray", dpi: 300, duplex: false };
 const SOURCES: [ScanSource, string][] = [["auto", "Auto"], ["feeder", "Feeder"], ["glass", "Glass"]];
+const SIDES = [["single", "Single-sided"], ["duplex", "Dual-sided"]] as const;
 const MODES: [ScanMode, string][] = [["gray", "Gray"], ["color", "Color"], ["black_white", "Black & white"]];
 const RESOLUTIONS = [150, 300, 600] as const;
 const RESOLUTION_OPTIONS = RESOLUTIONS.map((dpi) => [dpi, `${dpi} dpi`] as const);
-const SOURCE_HINTS: Record<ScanSource, string> = {
-  auto: "The feeder when paper is in it, otherwise the glass.",
-  feeder: "Every sheet in the feeder becomes one document.",
-  glass: "One page from the glass.",
-};
 const RESOLUTION_HINTS: Record<number, string> = {
   150: "Quick and small; fine for plain letters.",
   300: "Right for most documents.",
   600: "For small print and photos; slow and large.",
 };
+
+function sourceHint(source: ScanSource, duplex: boolean): string {
+  if (source === "glass") return "One page from the glass.";
+  if (source === "feeder") {
+    return duplex
+      ? "Both sides of every sheet in the feeder become one document."
+      : "Every sheet in the feeder becomes one document.";
+  }
+  return duplex
+    ? "Both sides from the feeder when paper is in it, otherwise the glass."
+    : "The feeder when paper is in it, otherwise the glass.";
+}
 
 function readSettings(): ScanRequest {
   try {
@@ -32,6 +40,7 @@ function readSettings(): ScanRequest {
       source: SOURCES.find(([value]) => value === saved.source)?.[0] ?? DEFAULTS.source,
       mode: MODES.find(([value]) => value === saved.mode)?.[0] ?? DEFAULTS.mode,
       dpi: RESOLUTIONS.find((value) => value === saved.dpi) ?? DEFAULTS.dpi,
+      duplex: typeof saved.duplex === "boolean" ? saved.duplex : DEFAULTS.duplex,
     };
   } catch {
     return DEFAULTS;
@@ -50,6 +59,7 @@ function Choice<T extends string | number>(props: {
   label: string;
   value: T;
   options: readonly (readonly [T, string])[];
+  disabled?: boolean;
   onChange: (value: T) => void;
 }) {
   const groove = createGrooveThumb(() => props.value);
@@ -61,6 +71,7 @@ function Choice<T extends string | number>(props: {
       <For each={props.options}>{([option, name]) => <button
         type="button"
         class="groove__option"
+        disabled={props.disabled}
         aria-pressed={selected[String(option)] ? "true" : "false"}
         onClick={() => props.onChange(option)}
       >{name}</button>}</For>
@@ -79,6 +90,8 @@ export function ScanControl() {
   const { transfers } = useContext(AppContext);
   let dialog!: HTMLDialogElement;
   const [settings, setSettings] = createStore({ ...readSettings() }, { name: "scan settings" });
+  const activeSource = createProjection<Record<string, boolean>>(() => ({ [settings.source]: true }), {}, { name: "active scan source" });
+  const isGlass = () => Boolean(activeSource.glass);
   const scanning = () => transfers.state.scanning;
 
   function open() {
@@ -88,10 +101,10 @@ export function ScanControl() {
 
   function start(event: SubmitEvent) {
     event.preventDefault();
-    const next = { ...settings };
-    saveSettings(next);
+    const saved = { ...settings };
+    saveSettings(saved);
     dialog.close();
-    void transfers.scan(next);
+    void transfers.scan({ ...saved, duplex: saved.source !== "glass" && saved.duplex });
   }
 
   return <>
@@ -108,7 +121,13 @@ export function ScanControl() {
         </div>
         <div class="scan-dialog__group">
           <Choice label="Paper from" value={settings.source} options={SOURCES} onChange={(source) => setSettings((draft) => { draft.source = source; })} />
-          <p class="scan-dialog__hint">{SOURCE_HINTS[settings.source]}</p>
+          <p class="scan-dialog__hint">{sourceHint(settings.source, settings.duplex)}</p>
+        </div>
+        <div class="scan-dialog__group">
+          <Choice label="Sides" value={isGlass() ? "single" : settings.duplex ? "duplex" : "single"} options={SIDES}
+            disabled={isGlass()}
+            onChange={(side) => setSettings((draft) => { draft.duplex = side === "duplex"; })} />
+          <Show when={isGlass()}><p class="scan-dialog__hint">Glass scans one side at a time.</p></Show>
         </div>
         <Choice label="Color" value={settings.mode} options={MODES} onChange={(mode) => setSettings((draft) => { draft.mode = mode; })} />
         <div class="scan-dialog__group">

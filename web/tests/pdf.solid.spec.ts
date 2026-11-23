@@ -7,7 +7,7 @@ declare global {
   interface Window { pdfPageLog: { painted: number[]; cleaned: number[] } }
 }
 
-test("turning and closing the Reader clean inactive PDF pages while keeping the file cached", async ({ page, context }) => {
+test("scrolling and closing the Reader clean distant PDF pages while keeping the file cached", async ({ page, context }) => {
   const pdf = { ...documentFixtures[0], media_type: "pdf" as const, page_count: 3 };
   const archive = await mockArchive(context, { documents: [pdf] });
   await page.goto(appUrl);
@@ -46,12 +46,15 @@ test("turning and closing the Reader clean inactive PDF pages while keeping the 
   await expect.poll(painted).toContain(1);
   expect(await cleaned()).toEqual([]);
 
-  for (const number of [2, 3]) {
-    await reader.getByRole("button", { name: "Next page" }).click();
-    await expect(reader.locator(".text-layer").getByText(`Statement page ${number}`)).toBeVisible();
-    await expect.poll(painted).toContain(number);
-    await expect.poll(cleaned).toEqual(Array.from({ length: number - 1 }, (_, index) => index + 1));
-  }
+  // Scrolling smoothly to page 2 and page 3 paints each page and cleans distant offscreen page 1.
+  await reader.getByRole("button", { name: "Next page" }).click();
+  await expect(reader.locator(".text-layer").getByText("Statement page 2")).toBeVisible();
+  await expect.poll(painted).toContain(2);
+
+  await reader.getByRole("button", { name: "Next page" }).click();
+  await expect(reader.locator(".text-layer").getByText("Statement page 3")).toBeVisible();
+  await expect.poll(painted).toContain(3);
+  await expect.poll(cleaned).toContain(1);
 
   await reader.getByRole("button", { name: "Close", exact: true }).click();
   await expect(reader).toBeHidden();

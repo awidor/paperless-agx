@@ -44,8 +44,12 @@ test("scans with the chosen options, shows the pages and opens the new document"
   const dialog = page.getByRole("dialog", { name: "Scan" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("group", { name: "Paper from" }).getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.getByRole("group", { name: "Sides" }).getByRole("button", { name: "Single-sided" })).toHaveAttribute("aria-pressed", "true");
   await dialog.getByRole("button", { name: "Feeder" }).click();
   await expect(dialog.getByText("Every sheet in the feeder becomes one document.")).toBeVisible();
+  await dialog.getByRole("button", { name: "Dual-sided" }).click();
+  await expect(dialog.getByRole("button", { name: "Dual-sided" })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.getByText("Both sides of every sheet in the feeder become one document.")).toBeVisible();
   await dialog.getByRole("button", { name: "Color", exact: true }).click();
   await dialog.getByRole("button", { name: "600 dpi" }).click();
   await dialog.getByRole("button", { name: "Scan", exact: true }).click();
@@ -54,16 +58,20 @@ test("scans with the chosen options, shows the pages and opens the new document"
   const tray = page.getByRole("status", { name: "Scan" });
   await expect(tray.getByText("Scan added")).toBeVisible();
   await expect(tray.getByText("2 pages added and queued for reading")).toBeVisible();
-  expect(requests).toEqual([{ source: "feeder", mode: "color", dpi: 600 }]);
+  expect(requests).toEqual([{ source: "feeder", mode: "color", dpi: 600, duplex: true }]);
 
   await tray.getByRole("button", { name: "Open" }).click();
   await expect(page.getByRole("dialog", { name: scanned.filename })).toBeVisible();
   await page.keyboard.press("Escape");
 
-  // The choices are remembered for the next scan.
+  // The choices are remembered for the next scan, and glass disables dual-sided without losing the saved choice.
   await page.getByRole("button", { name: "Scan", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Feeder" })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.getByRole("button", { name: "Dual-sided" })).toHaveAttribute("aria-pressed", "true");
   await expect(dialog.getByRole("button", { name: "600 dpi" })).toHaveAttribute("aria-pressed", "true");
+  await dialog.getByRole("button", { name: "Glass" }).click();
+  await expect(dialog.getByRole("button", { name: "Dual-sided" })).toBeDisabled();
+  await expect(dialog.getByText("Glass scans one side at a time.")).toBeVisible();
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expect(dialog).toBeHidden();
 });

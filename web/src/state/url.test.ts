@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { initialQuery, readUrlState, writeUrlState } from "./url";
 
 test("round-trips a search, filters, sort, view, and selected page", () => {
-  const url = new URL("https://paper.test/?q=%22annual+bill%22&page=2&sender=ACME&from=2024-02-29&to=2024-03-01&sort=title_asc&view=list&document=42&document_page=3#current");
+  const url = new URL("https://paper.test/?q=%22annual+bill%22&sender=ACME&from=2024-02-29&to=2024-03-01&sort=title_asc&view=list&document=42&document_page=3#current");
   const parsed = readUrlState(url.searchParams);
   expect(parsed).toEqual({
     search: '"annual bill"', view: "list",
-    query: { ...initialQuery, page: 2, sender: "ACME", createdFrom: "2024-02-29", createdTo: "2024-03-01", sort: "title_asc" },
+    query: { ...initialQuery, sender: "ACME", createdFrom: "2024-02-29", createdTo: "2024-03-01", sort: "title_asc" },
     selected: { id: 42, page: 3 },
   });
   expect(writeUrlState(new URL(url), parsed).href).toBe(url.href);

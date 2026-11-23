@@ -1,6 +1,6 @@
-import { createMemo, createSignal, Errored, isPending, Loading, Match, Repeat, Show, Switch, useContext } from "solid-js";
+import { createEffect, createMemo, createSignal, Errored, isPending, Loading, Match, onSettled, Repeat, Show, Switch, useContext } from "solid-js";
 import { FilterBar, FilterToggle } from "../../components/FilterBar";
-import { ChevronLeft, ChevronRight, LayoutGrid, Rows3, Upload } from "../../components/Icons";
+import { LayoutGrid, Rows3, Upload } from "../../components/Icons";
 import { Alert, EmptyState, Spinner } from "../../components/ui";
 import { activeFilterCount, groupDocuments, plural } from "../../lib/format";
 import { createGrooveThumb } from "../../primitives/motion";
@@ -101,17 +101,36 @@ function LibraryContents(props: { onUpload: () => void }) {
       <Match when={url.state.view === "grid"}><Shelf groups={groups()} /></Match>
       <Match when={url.state.view === "list"}><Ledger groups={groups()} /></Match>
     </Switch>
-    <Show when={library.total > query().pageSize}><Pager /></Show>
+    <Show when={library.hasMore}><LibraryMore /></Show>
   </>;
 }
 
-function Pager() {
-  const { url, library: { library } } = useContext(AppContext);
-  const page = () => library.query.page;
-  const pages = () => Math.ceil(library.total / library.query.pageSize);
-  return <nav class="pager" aria-label="Library pages">
-    <button type="button" class="btn" disabled={page() === 1} onClick={() => url.setPage(page() - 1)}><ChevronLeft size={16} aria-hidden="true" /> Previous</button>
-    <p class="pager__where">Page {page()} of {pages()}</p>
-    <button type="button" class="btn" disabled={page() >= pages()} onClick={() => url.setPage(page() + 1)}>Next <ChevronRight size={16} aria-hidden="true" /></button>
-  </nav>;
+function LibraryMore() {
+  const { library: service } = useContext(AppContext);
+  const { library, loadingMore } = service;
+  let sentinel!: HTMLDivElement;
+
+  onSettled(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) service.loadMore();
+    }, { rootMargin: "320px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  });
+
+  createEffect(
+    () => ({ pages: library.loadedPages, more: library.hasMore, error: library.error }),
+    ({ more, error }) => {
+      if (!more || error) return;
+      if (sentinel.getBoundingClientRect().top <= window.innerHeight + 320) service.loadMore();
+    },
+    { defer: true, name: "continue infinite library scroll" },
+  );
+
+  return <div class="library-more" ref={sentinel}>
+    <Show when={loadingMore()}>
+      <p class="status-line" role="status"><Spinner /> Loading more documents</p>
+    </Show>
+  </div>;
 }

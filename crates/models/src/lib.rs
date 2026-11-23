@@ -403,6 +403,8 @@ pub struct ScanRequest {
     pub mode: ScanMode,
     #[serde(default = "default_scan_dpi")]
     pub dpi: u16,
+    #[serde(default)]
+    pub duplex: bool,
 }
 
 const fn default_scan_dpi() -> u16 {

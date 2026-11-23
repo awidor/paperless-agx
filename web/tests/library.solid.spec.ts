@@ -93,7 +93,7 @@ test("a slow library poll lands before the next request starts", async ({ page, 
   expect(archive.listRequests).toHaveLength(3);
 });
 
-test("filters, sorts, pages, and restores library URLs", async ({ page, context, capture }) => {
+test("filters, sorts, infinite-scrolls, and restores library URLs", async ({ page, context, capture }) => {
   const documents = [...documentFixtures, ...Array.from({ length: 20 }, (_, index) => ({
     ...documentFixtures[index % documentFixtures.length], document_id: 100 + index, sender: "Bulk",
     title: `Work order ${index + 1}`,
@@ -103,18 +103,17 @@ test("filters, sorts, pages, and restores library URLs", async ({ page, context,
   const rows = page.locator(".ledger__row");
   const titles = page.locator(".ledger__title");
   await expect(rows).toHaveCount(24);
+  await expect(page.getByRole("button", { name: "Next" })).toHaveCount(0);
   await rendered(page);
 
   await capture("library next page", async () => {
-    await page.getByRole("button", { name: "Next" }).click();
-    await expect(page.getByText("Page 2 of 2")).toBeVisible();
-    await expect(rows).toHaveCount(4);
-    await expect(page).toHaveURL(/page=2&view=list/);
+    await page.locator(".library-more").scrollIntoViewIfNeeded();
+    await expect(rows).toHaveCount(documents.length);
   });
 
   await capture("library sort", async () => {
     await page.getByLabel("Sort").selectOption("title_asc");
-    await expect(page.getByText("Page 1 of 2")).toBeVisible();
+    await expect(rows).toHaveCount(24);
     await expect(titles.first()).toHaveText("Annual account summary");
   });
 

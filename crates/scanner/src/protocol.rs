@@ -43,6 +43,7 @@ const STATE_LOCKING: u16 = 0x100;
 const STATE_INVALID_AREA: u16 = 0x200;
 const STATE_RESOURCE_BUSY: u16 = 0x400;
 
+pub(crate) const SOURCE_DUPLEX: u8 = 0x10;
 pub(crate) const SOURCE_FEEDER: u8 = 0x20;
 pub(crate) const SOURCE_GLASS: u8 = 0x40;
 const COMPOSITION_RGB: u8 = 0x05;
@@ -79,6 +80,7 @@ pub struct ScannerInfo {
     pub model: String,
     pub resolutions: Vec<u16>,
     pub has_feeder: bool,
+    pub has_duplex: bool,
     pub feeder_loaded: bool,
     pub max_width: u32,
     pub max_length_glass: u32,
@@ -96,7 +98,8 @@ impl ScannerInfo {
         };
         let bits =
             u32::from(reply[0x37]) << 16 | u32::from(reply[0x24]) << 8 | u32::from(reply[0x25]);
-        let has_feeder = reply[0x26] & 0x03 != 0;
+        let has_duplex = reply[0x26] & 0x18 != 0;
+        let has_feeder = (reply[0x26] & 0x03 != 0) || has_duplex;
         let mut resolutions: Vec<u16> = INQUIRY_DPI_BITS
             .iter()
             .enumerate()
@@ -108,6 +111,7 @@ impl ScannerInfo {
             model: String::from_utf8_lossy(&reply[4..0x24]).trim().to_owned(),
             resolutions,
             has_feeder,
+            has_duplex,
             feeder_loaded: has_feeder && reply[0x35] == 0x02,
             max_width: be32(0x28),
             max_length_glass: be32(0x3c),
@@ -330,6 +334,7 @@ mod tests {
         assert_eq!(info.model, "Samsung M337x 387x 407x Series");
         assert_eq!(info.resolutions, vec![75, 100, 150, 200, 300, 600]);
         assert!(info.has_feeder);
+        assert!(info.has_duplex);
         assert!(!info.feeder_loaded);
         assert!(
             ScannerInfo::parse(&inquiry_reply(true))

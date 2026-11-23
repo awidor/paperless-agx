@@ -47,7 +47,6 @@ export function readUrlState(params: URLSearchParams): UrlState {
   return {
     query: {
       ...initialQuery,
-      page: positiveInteger(params.get("page"), 1),
       sender: params.get("sender") || "",
       createdFrom: dateValue(params.get("from")),
       createdTo: dateValue(params.get("to")),
@@ -64,7 +63,6 @@ export function writeUrlState(url: URL, state: UrlState): URL {
   const { query, search, view, selected } = state;
   for (const key of PARAMS) params.delete(key);
   if (search) params.set("q", search);
-  if (query.page > 1) params.set("page", String(query.page));
   if (query.sender) params.set("sender", query.sender);
   if (query.createdFrom) params.set("from", query.createdFrom);
   if (query.createdTo) params.set("to", query.createdTo);
@@ -161,11 +159,6 @@ export function createUrlState() {
     setState((current) => { Object.assign(current.query, query, { page: 1 }); });
   }
 
-  function setPage(page: number) {
-    setState((current) => { current.query.page = page; });
-    window.scrollTo({ top: 0 });
-  }
-
   function setView(view: View) {
     setState((current) => { current.view = view; });
   }
@@ -191,7 +184,7 @@ export function createUrlState() {
   }
 
   return {
-    state, draft, setDraft, run, submitSearch, clearSearch, rerunSearch, updateQuery, setPage, setView,
+    state, draft, setDraft, run, submitSearch, clearSearch, rerunSearch, updateQuery, setView,
     openDocument, setDocumentPage, closeDocument, guardReader,
   };
 }

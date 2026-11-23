@@ -56,7 +56,7 @@
     "AgentError": {"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}},
     "ScanSource": {"type": "string", "enum": ["auto", "feeder", "glass"], "description": "`auto` uses the feeder when paper is in it, else the glass."},
     "ScanMode": {"type": "string", "enum": ["color", "gray", "black_white"]},
-    "ScanRequest": {"type": "object", "properties": {"source": {"$ref": "#/components/schemas/ScanSource", "default": "auto"}, "mode": {"$ref": "#/components/schemas/ScanMode", "default": "gray"}, "dpi": {"type": "integer", "enum": [150, 200, 300, 600], "default": 300}}},
+    "ScanRequest": {"type": "object", "properties": {"source": {"$ref": "#/components/schemas/ScanSource", "default": "auto"}, "mode": {"$ref": "#/components/schemas/ScanMode", "default": "gray"}, "dpi": {"type": "integer", "enum": [150, 200, 300, 600], "default": 300}, "duplex": {"type": "boolean", "default": false, "description": "Scan both sides of each sheet in the feeder."}}},
     "ScanProgress": {"type": "object", "required": ["pages"], "properties": {"pages": {"type": "integer", "description": "Pages scanned so far."}}},
     "ScanResult": {"type": "object", "required": ["document", "pages"], "properties": {"document": {"$ref": "#/components/schemas/Document"}, "pages": {"type": "integer"}}},
     "ScanError": {"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}},

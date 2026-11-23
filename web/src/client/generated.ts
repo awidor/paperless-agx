@@ -382,6 +382,11 @@ export interface components {
              * @enum {integer}
              */
             dpi: 150 | 200 | 300 | 600;
+            /**
+             * @description Scan both sides of each sheet in the feeder.
+             * @default false
+             */
+            duplex: boolean;
         };
         ScanProgress: {
             /** @description Pages scanned so far. */

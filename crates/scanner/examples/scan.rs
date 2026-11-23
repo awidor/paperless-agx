@@ -33,6 +33,8 @@ enum Command {
         mode: Mode,
         #[arg(long, default_value_t = 300)]
         dpi: u16,
+        #[arg(long)]
+        duplex: bool,
         #[arg(short, long, default_value = "scan.pdf")]
         output: PathBuf,
     },
@@ -62,6 +64,7 @@ async fn main() -> Result<()> {
             source,
             mode,
             dpi,
+            duplex,
             output,
         } => {
             let source = match source {
@@ -76,7 +79,7 @@ async fn main() -> Result<()> {
             };
             let started = Instant::now();
             let pages = scanner
-                .scan(ScanSettings { source, dpi }, |pages| {
+                .scan(ScanSettings { source, dpi, duplex }, |pages| {
                     eprintln!("page {pages} after {:.1}s", started.elapsed().as_secs_f32());
                 })
                 .await?;

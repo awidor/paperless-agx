@@ -37,6 +37,20 @@ test("opens a PDF, turns pages, shows the OCR replica, and saves metadata", asyn
   });
   expect(archive.pdfRequests).toHaveLength(1);
 
+  // Scrolling back up to page 1 and down to page 2 updates the active page smoothly.
+  const stage = dialog.locator(".reader__stage");
+  await stage.evaluate((element) => {
+    element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+    element.scrollTo({ top: 0, behavior: "instant" });
+  });
+  await expect(dialog.getByText("Page 1 of 2")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Show page 1" })).toHaveAttribute("aria-pressed", "true");
+  await stage.evaluate((element) => {
+    element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+  });
+  await expect(dialog.getByText("Page 2 of 2")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Show page 2" })).toHaveAttribute("aria-pressed", "true");
+
   await capture("reader show OCR replica", async () => {
     await dialog.getByRole("tab", { name: "OCR text" }).click();
     const replica = dialog.getByLabel("Digital replica of page 2");
@@ -156,7 +170,7 @@ test("scans with the edited settings, reports progress, and opens the scanned do
     await expect(scanner).toBeHidden();
     await expect(tray.getByText("Waiting for the first page…")).toBeVisible();
     await expect(page.getByRole("button", { name: "Scanning" })).toBeDisabled();
-    expect(await page.evaluate(() => window.testStreams[0].body)).toEqual({ source: "feeder", mode: "gray", dpi: 300 });
+    expect(await page.evaluate(() => window.testStreams[0].body)).toEqual({ source: "feeder", mode: "gray", dpi: 300, duplex: false });
   });
 
   await capture("scan progress", async () => {
@@ -355,6 +369,6 @@ test("scan failure and retry stay within the reactive budget", async ({ page, co
     await alert.getByRole("button", { name: "Try again" }).click();
     await expect(page.getByText("Waiting for the first page…")).toBeVisible();
     await page.waitForFunction(() => window.testStreams.length === 2);
-    expect(await page.evaluate(() => window.testStreams[1].body)).toEqual({ source: "auto", mode: "gray", dpi: 300 });
+    expect(await page.evaluate(() => window.testStreams[1].body)).toEqual({ source: "auto", mode: "gray", dpi: 300, duplex: false });
   });
 });

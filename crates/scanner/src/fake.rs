@@ -31,6 +31,8 @@ pub fn inquiry_reply(feeder_loaded: bool) -> Vec<u8> {
 pub struct FakeSetup {
     /// Sheets in the feeder; zero means the feeder is empty.
     pub feeder_sheets: usize,
+    /// Whether the scanner advertises a duplex feeder (RADF/DADF).
+    pub has_duplex: bool,
     /// How many RESERVE_UNIT requests are answered BUSY first.
     pub busy_reserves: usize,
     /// The feeder jams when it reaches this sheet (counting from one).
@@ -44,6 +46,7 @@ impl Default for FakeSetup {
     fn default() -> Self {
         Self {
             feeder_sheets: 0,
+            has_duplex: true,
             busy_reserves: 0,
             jam_on_sheet: None,
             strips_per_page: 2,
@@ -58,6 +61,7 @@ struct State {
     commands: Vec<u8>,
     window: Option<Vec<u8>>,
     feeder_left: usize,
+    sides_left: usize,
     busy_left: usize,
     /// Pages started in this scan (sheets fed, or the glass page).
     pages: usize,
@@ -169,7 +173,13 @@ async fn serve(
 fn respond(state: &mut State, setup: &FakeSetup, command: u8, parameters: &[u8]) -> Vec<u8> {
     state.commands.push(command);
     match command {
-        0x12 => inquiry_reply(state.feeder_left > 0),
+        0x12 => {
+            let mut reply = inquiry_reply(state.feeder_left > 0);
+            if !setup.has_duplex {
+                reply[0x26] &= !0x18;
+            }
+            reply
+        }
         0x16 if state.busy_left > 0 => {
             state.busy_left -= 1;
             reply(0x08)
@@ -180,22 +190,36 @@ fn respond(state: &mut State, setup: &FakeSetup, command: u8, parameters: &[u8])
             reply(0)
         }
         0x24 => {
-            state.window = Some(parameters[..20].to_vec());
+            let window = parameters[..20].to_vec();
+            state.sides_left = match window[19] {
+                0x10 => state.feeder_left * 2,
+                0x20 => state.feeder_left,
+                _ => 1,
+            };
+            state.window = Some(window);
             reply(0)
         }
         0x31 => {
-            let feeder = state
-                .window
-                .as_ref()
-                .is_some_and(|window| window[19] == 0x20);
+            let source = state.window.as_ref().map(|window| window[19]);
+            let feeder = matches!(source, Some(0x10 | 0x20));
             if feeder {
-                if setup.jam_on_sheet == Some(state.pages + 1) {
+                let sheet = if source == Some(0x10) {
+                    state.pages / 2 + 1
+                } else {
+                    state.pages + 1
+                };
+                if setup.jam_on_sheet == Some(sheet) {
                     return check(0x020);
                 }
-                if state.feeder_left == 0 {
+                if state.sides_left == 0 {
                     return check(0x010);
                 }
-                state.feeder_left -= 1;
+                state.sides_left -= 1;
+                state.feeder_left = if source == Some(0x10) {
+                    state.sides_left.div_ceil(2)
+                } else {
+                    state.sides_left
+                };
             }
             state.pages += 1;
             state.strip = 0;
